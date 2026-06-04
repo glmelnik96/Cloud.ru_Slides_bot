@@ -136,7 +136,9 @@ class FlowBlock(BaseModel):
 
 
 class FlowArrow(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    # populate_by_name lets us roundtrip through `model_dump()` (which emits
+    # field names — `src`/`dst`) without losing validation on re-parse.
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
     # Either id-based (`from`/`to` block id strings) or grid-based (lists).
     # `from` is a Python keyword → expose via alias.
     src: str | list[int] = Field(alias="from")
