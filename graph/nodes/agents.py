@@ -16,6 +16,7 @@ nice-to-have, not required).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -97,6 +98,73 @@ def brief_node(state: SessionState) -> dict[str, Any]:
 
 # ─── 02 Slide Classifier (DeepSeek) ──────────────────────────────────────────
 
+def _coerce_thin_tables(classification_dump: dict[str, Any]) -> int:
+    """Demote ``table_native`` slides with <3 columns to ``multicolumn``.
+
+    The classifier prompt says "Регулярная таблица ≥3×3 → table_native" but
+    the LLM occasionally picks ``table_native`` on 2-column lists. Canonical
+    triggers (in ``validate_plan.py``) then flag it as a layout mistake.
+    Coerce here so downstream nodes get a sensible donor.
+
+    Mutates in place. Returns the count of coerced slides.
+    """
+    coerced = 0
+    for s in classification_dump.get("slides") or []:
+        if s.get("slide_type") != "table_native":
+            continue
+        tbl = s.get("table") or {}
+        n_cols = len(tbl.get("headers") or [])
+        if n_cols >= 3:
+            continue
+        # 2-col table → multicolumn with 2col hint; 0/1-col → text.
+        s["slide_type"] = None
+        s["table"] = None
+        if n_cols == 2:
+            s["category"] = "multicolumn"
+            s["subcategory_hint"] = "2col"
+        else:
+            s["category"] = "text"
+        coerced += 1
+    return coerced
+
+
+def _coerce_overflow_kpis(classification_dump: dict[str, Any]) -> int:
+    """Clamp ``kpi_native`` slides to the renderer's hard 1-3 numbers limit.
+
+    ``skill_assets/scripts/kpi_renderer.py::render_kpi`` raises
+    ``ValueError("KPI supports 1-3 numbers, got N")`` for n==0 or n>3.
+    Classifier prompt asks for "3 ключевых KPI" but the LLM occasionally
+    produces 4-6 (it concatenates every number in the brief) or 0
+    (mis-classifies a non-stats slide as ``kpi_native``).
+
+    Policy:
+      • n > 3 → truncate to first 3. Preserves the KPI layout, which is
+        the strongest visual element on a stats slide; the LLM puts the
+        most salient numbers first, so the tail is the safer cut.
+      • n == 0 → demote to ``multicolumn``. A KPI slide with no numbers
+        is broken; multicolumn is a safe text-only fallback.
+
+    Mutates in place. Returns the count of slides touched.
+    """
+    coerced = 0
+    for s in classification_dump.get("slides") or []:
+        if s.get("slide_type") != "kpi_native":
+            continue
+        kpi = s.get("kpi") or {}
+        nums = kpi.get("numbers") or []
+        if 1 <= len(nums) <= 3:
+            continue
+        if len(nums) > 3:
+            kpi["numbers"] = nums[:3]
+            s["kpi"] = kpi
+        else:  # len(nums) == 0
+            s["slide_type"] = None
+            s["kpi"] = None
+            s["category"] = "multicolumn"
+        coerced += 1
+    return coerced
+
+
 def classify_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.CLASSIFYING, pct=25, detail="классификация слайдов")
     arts = _artefacts(state)
@@ -107,9 +175,26 @@ def classify_node(state: SessionState) -> dict[str, Any]:
         messages=agent_02_slide_classifier.build_messages(brief),
         model_cls=DeckClassification,
     )
-    arts["classification"] = classification.model_dump()
+    classification_dump = classification.model_dump()
+    thin_tables = _coerce_thin_tables(classification_dump)
+    overflow_kpis = _coerce_overflow_kpis(classification_dump)
+    arts["classification"] = classification_dump
+    if thin_tables:
+        logger.warning(
+            "node.classify.thin_tables_coerced",
+            session_id=state.session_id,
+            count=thin_tables,
+        )
+    if overflow_kpis:
+        logger.warning(
+            "node.classify.overflow_kpis_coerced",
+            session_id=state.session_id,
+            count=overflow_kpis,
+        )
     logger.info("node.classify.done", session_id=state.session_id,
-                slides=len(classification.slides))
+                slides=len(classification.slides),
+                thin_tables_coerced=thin_tables,
+                overflow_kpis_coerced=overflow_kpis)
     return {"artefacts": arts, "stage": Stage.CLASSIFYING.value, "progress_pct": 30}
 
 
@@ -118,6 +203,14 @@ def classify_node(state: SessionState) -> dict[str, Any]:
 def design_node(state: SessionState) -> dict[str, Any]:
     """Runs Agent 04 BEFORE Distributor — Distributor needs slot capacities
     from the chosen donors. Order: classify → design → distribute.
+
+    Post-LLM, validates every ``layout_idx`` against
+    ``donor_map.valid_donor_ids()``. Picks that aren't in the slot map
+    (designer hallucination — common before v1.1 prompt rewrite, e.g.
+    template meta-slides 1, 9) are replaced by
+    ``default_donor_for_category()``. We DON'T re-run the LLM on bad
+    picks — a deterministic fallback keeps the cost predictable.
+    Native slides (layout_idx=0) are passed through.
     """
     _emit(state, Stage.DESIGNING, pct=35, detail="подбор layout")
     arts = _artefacts(state)
@@ -128,9 +221,53 @@ def design_node(state: SessionState) -> dict[str, Any]:
         messages=agent_04_layout_designer.build_messages(classification),
         model_cls=LayoutPlan,
     )
-    arts["layouts"] = layouts.model_dump(by_alias=True)
+
+    from graph import donor_map  # noqa: WPS433 — local to keep cycle clear
+    valid = donor_map.valid_donor_ids()
+    cls_by_num: dict[int, dict[str, Any]] = {
+        int(s.get("num", 0)): s for s in (classification.get("slides") or [])
+    }
+
+    layouts_dump = layouts.model_dump(by_alias=True)
+    repairs: list[dict[str, Any]] = []
+    for entry in layouts_dump.get("slides") or []:
+        idx = entry.get("layout_idx")
+        if idx in (None, 0):
+            # 0 = native render (no donor) — leave alone.
+            continue
+        if int(idx) in valid:
+            continue
+        cls = cls_by_num.get(int(entry.get("num") or 0)) or {}
+        fallback = donor_map.default_donor_for_category(
+            cls.get("category", "other"),
+            subcategory_hint=cls.get("subcategory_hint"),
+            dark=bool(cls.get("dark")),
+        )
+        repairs.append({
+            "num": entry.get("num"),
+            "from": idx,
+            "to": fallback,
+            "category": cls.get("category"),
+        })
+        # Fallback to None means we couldn't find a safe donor — keep the
+        # LLM's pick so the pipeline still produces something; assemble_node
+        # will log the unmapped donor when it tries to translate slots.
+        entry["layout_idx"] = fallback if fallback is not None else idx
+        entry["layout_name"] = entry.get("layout_name") or "fallback"
+        entry["rationale"] = (entry.get("rationale") or "") + " [auto-repair: donor not in slot map]"
+
+    if repairs:
+        logger.warning(
+            "node.design.invalid_donors_repaired",
+            session_id=state.session_id,
+            count=len(repairs),
+            repairs=repairs,
+        )
+
+    arts["layouts"] = layouts_dump
     logger.info("node.design.done", session_id=state.session_id,
-                slides=len(layouts.slides))
+                slides=len(layouts_dump.get("slides") or []),
+                repaired=len(repairs))
     return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 40}
 
 
@@ -233,6 +370,58 @@ def infographic_node(state: SessionState) -> dict[str, Any]:
 
 # ─── 07 Copy Editor (GLM OFF) ────────────────────────────────────────────────
 
+# Emoji codepoints render as empty squares (□) under SB Sans Display (the
+# Cloud.ru template font). Visual Verifier flagged this on slide 4 of the
+# 2026-06-04 live run ("эмодзи отображаются как пустые квадраты"). Source
+# decks routinely use emoji as bullet markers (📤🔗📊🧠) which the LLM
+# happily passes through. Strip them deterministically post-copyedit so we
+# don't depend on the LLM remembering to clean them up.
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"  # symbols & pictographs, transport, emoticons, supplemental
+    "\U00002600-\U000027BF"  # misc symbols + dingbats
+    "\U0001F1E6-\U0001F1FF"  # regional indicator (flags)
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0001F000-\U0001F02F"  # mahjong/dominos
+    "\U0001F0A0-\U0001F0FF"  # playing cards
+    "]",
+    flags=re.UNICODE,
+)
+
+
+def _strip_unsupported_glyphs(text: str) -> str:
+    """Remove emoji codepoints and collapse any whitespace they leave behind.
+
+    Returns the input unchanged when there are no matches so we don't churn
+    well-formed strings.
+    """
+    if not text or not _EMOJI_PATTERN.search(text):
+        return text
+    cleaned = _EMOJI_PATTERN.sub("", text)
+    # Tidy up leftover double spaces / leading bullets without an icon.
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"(?m)^[ \t]+", "", cleaned)
+    return cleaned.strip()
+
+
+def _strip_emoji_from_content(content_dump: dict[str, Any]) -> int:
+    """Apply ``_strip_unsupported_glyphs`` to every placeholder content in a
+    DeckContentAssignment dump. Returns the number of fields that changed.
+
+    Mutates the dict in place.
+    """
+    changed = 0
+    for slide in content_dump.get("slides") or []:
+        for ph in slide.get("placeholder_assignments") or []:
+            orig = ph.get("content")
+            if isinstance(orig, str):
+                new = _strip_unsupported_glyphs(orig)
+                if new != orig:
+                    ph["content"] = new
+                    changed += 1
+    return changed
+
+
 def copyedit_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.DESIGNING, pct=72, detail="редактура текста")
     arts = _artefacts(state)
@@ -241,10 +430,13 @@ def copyedit_node(state: SessionState) -> dict[str, Any]:
         messages=agent_07_copy_editor.build_messages(arts["content"]),
         model_cls=_DeckContentAssignment,
     )
-    arts["copy_edited"] = edited.model_dump()
+    edited_dump = edited.model_dump()
+    emoji_stripped = _strip_emoji_from_content(edited_dump)
+    arts["copy_edited"] = edited_dump
     total_edits = sum(s.edits_count for s in edited.slides)
     logger.info("node.copyedit.done", session_id=state.session_id,
-                slides=len(edited.slides), edits=total_edits)
+                slides=len(edited.slides), edits=total_edits,
+                emoji_stripped=emoji_stripped)
     return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 75}
 
 
@@ -280,3 +472,108 @@ def visual_verify_node(state: SessionState) -> dict[str, Any]:
     logger.info("node.visual.done", session_id=state.session_id,
                 verdict=verdict.llm_verdict, score=verdict.score_avg)
     return {"artefacts": arts, "stage": Stage.VALIDATING.value, "progress_pct": 92}
+
+
+# ─── M4 Autofix loop ─────────────────────────────────────────────────────────
+
+AUTOFIX_BUDGET = 1
+"""Max number of autofix passes per session. Each pass is a full re-build +
+re-verify cycle, so the wall-clock cost is roughly equal to one nominal
+pipeline run. We cap at 1 to keep per-deck Cloud.ru spend predictable; raise
+only after measuring real lift from a second pass."""
+
+
+def _collect_verifier_feedback(arts: dict[str, Any]) -> list[str]:
+    """Extract per-slide actionable issues for the autofix prompt.
+
+    Pulls from ``verifier_verdict.warnings`` (already filtered for canonical
+    noise in ``process_verify_node``) and ``visual_verdict.slides[].issues``
+    so the copy editor sees both validate_plan-level and vision-level signal.
+    """
+    feedback: list[str] = []
+    ver = arts.get("verifier_verdict") or {}
+    for b in (ver.get("blockers") or []):
+        feedback.append(f"BLOCKER: {b}")
+    for w in (ver.get("warnings") or []):
+        feedback.append(f"WARN: {w}")
+    vis = arts.get("visual_verdict") or {}
+    for sv in (vis.get("slides") or []):
+        if sv.get("slide_verdict") in ("REJECT", "NEEDS_REWORK"):
+            num = sv.get("num")
+            for iss in (sv.get("issues") or []):
+                rule = iss.get("rule") or ""
+                msg = (iss.get("msg") or "")[:200]
+                feedback.append(f"slide {num} ({rule}): {msg}")
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in feedback:
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out
+
+
+def autofix_node(state: SessionState) -> dict[str, Any]:
+    """Single autofix pass.
+
+    Reads verifier feedback, re-runs Agent 07 (Copy Editor) with the
+    feedback baked into the user message, and re-strips emoji. The graph
+    loops back to ``assemble_plan`` so build / brand / render / visual /
+    process_verify all re-run with the updated content.
+
+    Deterministic-only mutations (overflow size_pt, table demotion) are
+    handled upstream in ``classify_node`` and ``design_node``; this node
+    targets text-shaped issues that need LLM intervention.
+    """
+    arts = _artefacts(state)
+    iteration = int(state.autofix_iterations or 0) + 1
+    _emit(state, Stage.VALIDATING, pct=95,
+          detail=f"автоисправление #{iteration}")
+
+    feedback = _collect_verifier_feedback(arts)
+    base_content = arts.get("copy_edited") or arts.get("content") or {}
+
+    # Build the copy-editor prompt and append verifier feedback so the LLM
+    # knows what to focus on. Keep the original SYSTEM rules intact — we
+    # don't want the editor to start rewriting semantics, just to address
+    # the specific complaints. If the feedback list is empty we fall back
+    # to a plain re-run (still helpful: occasionally Copy Editor catches
+    # things it missed first time).
+    msgs = agent_07_copy_editor.build_messages(base_content)
+    if feedback:
+        bullet_list = "\n".join(f"- {line}" for line in feedback[:30])
+        msgs.append({
+            "role": "user",
+            "content": (
+                "Верификатор нашёл проблемы. Исправь только их, остальное оставь:\n"
+                f"{bullet_list}\n\n"
+                "ОСОБОЕ ВНИМАНИЕ: эмодзи (📤🔗📊🧠 и т.п.) в шрифте Cloud.ru "
+                "отображаются как пустые квадраты — удаляй их полностью. "
+                "Длинные строки сокращай, не теряя смысла."
+            ),
+        })
+
+    edited, _ = call_and_parse(
+        role=Role.COPY_EDITOR,
+        messages=msgs,
+        model_cls=_DeckContentAssignment,
+    )
+    edited_dump = edited.model_dump()
+    emoji_stripped = _strip_emoji_from_content(edited_dump)
+    arts["copy_edited"] = edited_dump
+
+    logger.info(
+        "node.autofix.done",
+        session_id=state.session_id,
+        iteration=iteration,
+        feedback_items=len(feedback),
+        emoji_stripped=emoji_stripped,
+        slides=len(edited.slides),
+    )
+    return {
+        "artefacts": arts,
+        "stage": Stage.VALIDATING.value,
+        "progress_pct": 78,  # rewind progress to indicate the loop-back
+        "autofix_iterations": iteration,
+    }

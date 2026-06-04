@@ -26,3 +26,6 @@ build/
 # IDE
 .vscode/
 .idea/
+
+# Local diagnostic dumps (template/result inspectors, ad-hoc plan.json copies)
+.tmp_diag/

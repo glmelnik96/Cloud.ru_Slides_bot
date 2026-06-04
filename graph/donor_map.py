@@ -24,8 +24,8 @@ def _map_path() -> Path:
 
 
 @lru_cache(maxsize=1)
-def _load() -> dict[int, dict[str, Any]]:
-    """Parse donor-slot-map.yaml and return ``{donor_idx: donor_record}``.
+def _load_raw() -> dict[str, Any]:
+    """Parse donor-slot-map.yaml and return the whole document.
 
     Donor IDs in the YAML are YAML integer keys; PyYAML returns them as
     ``int``. We keep that type so callers can lookup with the same
@@ -35,15 +35,153 @@ def _load() -> dict[int, dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"donor-slot-map missing: {path}")
     with path.open(encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+        return yaml.safe_load(f) or {}
+
+
+@lru_cache(maxsize=1)
+def _load() -> dict[int, dict[str, Any]]:
+    raw = _load_raw()
     donors = raw.get("donors") or {}
-    # Normalise keys to int — defensive in case anyone writes "4" in YAML.
     return {int(k): v for k, v in donors.items() if v}
 
 
 def reload() -> None:
     """Drop the cached map. Use in tests when the YAML changes on disk."""
     _load.cache_clear()
+    _load_raw.cache_clear()
+
+
+def valid_donor_ids() -> set[int]:
+    """Set of donor indices that exist in donor-slot-map.yaml.
+
+    Designer picks outside this set silently degrade to template default
+    text (see stack_gotchas #10 — first live run had donors 1 and 9 chosen,
+    which are template-internal meta-slides, not real donors). Use this
+    set to reject hallucinated picks before they reach build_v9.
+    """
+    return set(_load().keys())
+
+
+def category_equivalence() -> dict[str, list[int]]:
+    """Return ``{yaml_category: [donor_idx, ...]}`` from the YAML.
+
+    Empty lists are dropped (e.g. ``team`` has no usable donors in the
+    current template — those are all photo-PNGs).
+    """
+    raw = _load_raw()
+    out: dict[str, list[int]] = {}
+    for cat, lst in (raw.get("category_equivalence") or {}).items():
+        ids = [int(x) for x in (lst or []) if isinstance(x, int)]
+        # Defensive: keep only donors that are actually mapped.
+        ids = [i for i in ids if i in valid_donor_ids()]
+        if ids:
+            out[str(cat)] = ids
+    return out
+
+
+def tone_groups() -> dict[str, list[int]]:
+    raw = _load_raw()
+    out: dict[str, list[int]] = {}
+    for grp, lst in (raw.get("tone_groups") or {}).items():
+        ids = [int(x) for x in (lst or []) if isinstance(x, int)]
+        ids = [i for i in ids if i in valid_donor_ids()]
+        if ids:
+            out[str(grp)] = ids
+    return out
+
+
+# Bridge between SlideCategory (schemas/slides.py) + subcategory_hint (free text
+# from classifier) and the canonical categories in donor-slot-map.yaml. Keep the
+# values strictly in sync with `category_equivalence` keys in the YAML.
+_CATEGORY_BRIDGE: dict[str, list[str]] = {
+    "title":       ["title_open", "title_dark"],
+    "divider":     ["divider"],
+    "text":        ["content_text"],
+    "multicolumn": ["content_2col", "content_3col", "content_4block", "content_text"],
+    "image":       ["image_grid", "image_main", "screenshot"],
+    "team":        ["team"],
+    "timeline":    ["timeline"],
+    "table":       ["table"],
+    "callout":     ["callout"],
+    "logo":        ["logo_finale"],
+    # pattern_bg/tech/other have no first-class mapping — fall back to content_text.
+    "pattern_bg":  ["content_text"],
+    "tech":        ["content_text"],
+    "other":       ["content_text"],
+}
+
+# Subcategory hints from the classifier ("2col", "3col", "4subtitles", "6blocks",
+# "8blocks", "kpi3") narrow multicolumn picks. The classifier emits these as
+# free-form strings; we substring-match to stay resilient.
+_SUBCAT_OVERRIDES: list[tuple[str, str]] = [
+    ("2col",       "content_2col"),
+    ("3col",       "content_3col"),
+    ("4block",     "content_4block"),  # matches "4blocks" and "4block"
+    ("4subtitle",  "content_4block"),
+    ("6block",     "content_6subtitles"),  # only present if added to YAML
+    ("8block",     "content_8subtitles"),
+    ("kpi",        "kpi"),
+]
+
+
+def default_donor_for_category(
+    category: str,
+    subcategory_hint: str | None = None,
+    dark: bool = False,
+) -> int | None:
+    """Pick a sensible donor index for a (category, subcategory_hint) pair.
+
+    Returns the first valid donor index from the relevant
+    ``category_equivalence`` bucket, or ``None`` if nothing in the YAML
+    fits — caller should keep the LLM's pick or fall back to a safe text
+    donor of its own choosing.
+
+    Honours ``dark`` for title category (prefers ``title_dark`` first).
+    """
+    eq = category_equivalence()
+    sub = (subcategory_hint or "").lower()
+    # Subcategory hint wins if it matches a known multicolumn variant.
+    for needle, yaml_key in _SUBCAT_OVERRIDES:
+        if needle in sub and eq.get(yaml_key):
+            return eq[yaml_key][0]
+    buckets = list(_CATEGORY_BRIDGE.get(category, []))
+    if category == "title" and dark:
+        # Promote dark variant if requested.
+        buckets = [b for b in buckets if b == "title_dark"] + \
+                  [b for b in buckets if b != "title_dark"]
+    for b in buckets:
+        ids = eq.get(b)
+        if ids:
+            return ids[0]
+    return None
+
+
+def donor_summary() -> list[dict[str, Any]]:
+    """Compact per-donor record for the Layout Designer prompt.
+
+    Returns a list of ``{idx, category, description, use_when, max_chars}``
+    sorted by idx. Drives the dynamically-generated DONOR_TABLE in
+    ``llm/prompts/agent_04_layout_designer.py`` — keep this small (one
+    line per donor) so the prompt stays within context budget.
+    """
+    out: list[dict[str, Any]] = []
+    for idx, donor in sorted(_load().items()):
+        slots = donor.get("slots") or {}
+        # Find the longest text slot's max_chars as a rough capacity hint.
+        max_chars = 0
+        for slot in slots.values():
+            if isinstance(slot, dict):
+                v = slot.get("safe_max_chars") or slot.get("max_chars") or 0
+                if isinstance(v, int) and v > max_chars:
+                    max_chars = v
+        out.append({
+            "idx": int(idx),
+            "category": donor.get("category", ""),
+            "description": donor.get("description", "")[:120],
+            "use_when": (donor.get("use_when") or "")[:120],
+            "max_chars": max_chars,
+        })
+    return out
 
 
 def slot_specs_for_layouts(layout_idxs: list[int]) -> dict[str, list[dict[str, Any]]]:
@@ -102,4 +240,13 @@ def slot_name_by_ph_idx(layout_idx: int) -> dict[int, str]:
     return out
 
 
-__all__ = ["slot_specs_for_layouts", "slot_name_by_ph_idx", "reload"]
+__all__ = [
+    "slot_specs_for_layouts",
+    "slot_name_by_ph_idx",
+    "reload",
+    "valid_donor_ids",
+    "category_equivalence",
+    "tone_groups",
+    "default_donor_for_category",
+    "donor_summary",
+]

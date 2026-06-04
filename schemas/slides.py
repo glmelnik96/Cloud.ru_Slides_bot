@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ─── Shared enums ────────────────────────────────────────────────────────────
@@ -340,6 +340,13 @@ class BrandReport(BaseModel):
     score_avg: int = 100
     slides: list[SlideBrandReport] = Field(default_factory=list)
 
+    @field_validator("score_avg", mode="before")
+    @classmethod
+    def _round_score_avg(cls, v: Any) -> Any:
+        if isinstance(v, float):
+            return round(v)
+        return v
+
 
 # ─── 10 LLM Visual Verifier ─────────────────────────────────────────────────
 
@@ -375,6 +382,13 @@ class VisualSlideVerdict(BaseModel):
     score: int = 0
     issues: list[BrandViolation] = Field(default_factory=list)
 
+    @field_validator("score", mode="before")
+    @classmethod
+    def _round_score(cls, v: Any) -> Any:
+        if isinstance(v, float):
+            return round(v)
+        return v
+
 
 class GhostDeckTest(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -391,6 +405,18 @@ class VisualVerdict(BaseModel):
     ghost_deck_test: GhostDeckTest | None = None
     slides: list[VisualSlideVerdict] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
+
+    @field_validator("score_avg", mode="before")
+    @classmethod
+    def _round_score_avg(cls, v: Any) -> Any:
+        # Kimi-vision returned ``64.8`` on the 2026-06-04 live run, which
+        # tripped Pydantic's int_from_float. Round to nearest int instead
+        # of failing — the 0.x precision loss is meaningless for a 0-100
+        # rubric. Same coercion is applied to ``BrandReport`` and
+        # ``VerifierVerdict`` below.
+        if isinstance(v, float):
+            return round(v)
+        return v
 
 
 # ─── 09 Process Verifier (orchestration) ────────────────────────────────────

@@ -37,6 +37,8 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from graph.nodes.agents import (
+    AUTOFIX_BUDGET,
+    autofix_node,
     brief_node,
     classify_node,
     copyedit_node,
@@ -74,7 +76,30 @@ N_BRAND = "brand_guard"
 N_RENDER_PNG = "render_png"
 N_VISUAL = "visual_verify"
 N_PROCESS_VERIFY = "process_verify"
+N_AUTOFIX = "autofix"
 N_FINALIZE = "finalize"
+
+
+def _route_after_verify(state: SessionState) -> str:
+    """Conditional edge router after process_verify.
+
+    READY → finalize (ship).
+    NEEDS_REWORK with budget remaining → autofix (loop).
+    NEEDS_REWORK with no budget → finalize (ship as draft with NEEDS_REWORK noted).
+
+    We read the verdict from ``state.artefacts['verifier_verdict']`` rather
+    than re-deriving it, so the route stays in lockstep with what the
+    finalize/UI notes show. ``autofix_iterations`` is incremented inside
+    ``autofix_node`` itself, so checking ``< AUTOFIX_BUDGET`` here gives
+    exactly one retry pass before we ship as draft.
+    """
+    arts = state.artefacts or {}
+    verdict = (arts.get("verifier_verdict") or {}).get("verdict", "NEEDS_REWORK")
+    if verdict == "READY":
+        return N_FINALIZE
+    if (state.autofix_iterations or 0) < AUTOFIX_BUDGET:
+        return N_AUTOFIX
+    return N_FINALIZE
 
 
 def _build_graph() -> StateGraph:
@@ -93,6 +118,7 @@ def _build_graph() -> StateGraph:
     g.add_node(N_RENDER_PNG, render_png_node)
     g.add_node(N_VISUAL, visual_verify_node)
     g.add_node(N_PROCESS_VERIFY, process_verify_node)
+    g.add_node(N_AUTOFIX, autofix_node)
     g.add_node(N_FINALIZE, finalize_node)
 
     g.add_edge(START, N_PARSE)
@@ -109,7 +135,13 @@ def _build_graph() -> StateGraph:
     g.add_edge(N_BRAND, N_RENDER_PNG)
     g.add_edge(N_RENDER_PNG, N_VISUAL)
     g.add_edge(N_VISUAL, N_PROCESS_VERIFY)
-    g.add_edge(N_PROCESS_VERIFY, N_FINALIZE)
+    # M4 autofix loop: verify → (READY → finalize) | (NEEDS_REWORK + budget → autofix → re-assemble → ...)
+    g.add_conditional_edges(
+        N_PROCESS_VERIFY,
+        _route_after_verify,
+        {N_AUTOFIX: N_AUTOFIX, N_FINALIZE: N_FINALIZE},
+    )
+    g.add_edge(N_AUTOFIX, N_ASSEMBLE)
     g.add_edge(N_FINALIZE, END)
     return g
 

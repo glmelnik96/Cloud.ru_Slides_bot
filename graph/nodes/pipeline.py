@@ -241,8 +241,17 @@ def _native_block_is_usable(slide_type: str, cls: dict[str, Any]) -> bool:
         kpi = cls.get("kpi") or {}
         if not isinstance(kpi, dict):
             return False
-        if not (kpi.get("numbers") or []):
+        nums = kpi.get("numbers") or []
+        if not nums:
             return False
+        # Belt-and-braces: kpi_renderer.render_kpi() hard-caps at 3 numbers
+        # and raises ValueError otherwise — taking down the whole pipeline.
+        # classify_node._coerce_overflow_kpis is the primary truncation
+        # site; this mutation here catches any path that bypasses it
+        # (e.g. autofix loop re-injecting numbers, future agent additions).
+        if len(nums) > 3:
+            kpi["numbers"] = nums[:3]
+            cls["kpi"] = kpi
         return True
     if slide_type == "flow_diagram_native":
         flow = cls.get("flow") or {}
@@ -361,6 +370,17 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                     continue
                 # Donor route — translate ph_idx → canonical slot name.
                 slot_name_map = donor_map.slot_name_by_ph_idx(int(donor))
+                if not slot_name_map:
+                    # Donor isn't in donor-slot-map.yaml — build_v9 won't
+                    # match any slots and template defaults will leak through.
+                    # design_node should have caught this; log loudly so we
+                    # can extend the YAML or tighten the designer.
+                    logger.warning(
+                        "node.assemble.donor_unmapped",
+                        session_id=state.session_id,
+                        num=num,
+                        donor=int(donor),
+                    )
                 cont = content_by_num.get(num) or {}
                 phs = cont.get("placeholder_assignments") or []
                 slots: dict[str, Any] = {}
@@ -399,8 +419,15 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
             ps = PlanSlide.model_validate(ps_dump)
 
         # Attach icon assignments (Agent 05) under a single 'icons' key.
+        # Drop entries whose icon_path is null — the SVG library hasn't been
+        # populated yet (only brand_arrow.svg ships with M2), so unresolved
+        # picks would land in the plan as "ghost icons" that build_v9 can't
+        # render. Visual Verifier then reports them as plan↔PNG mismatches.
         icon_entry = icons_by_num.get(num) or {}
-        icon_assigns = icon_entry.get("icon_assignments") or []
+        icon_assigns = [
+            a for a in (icon_entry.get("icon_assignments") or [])
+            if a.get("icon_path")
+        ]
         if icon_assigns:
             ps_dump = ps.model_dump()
             ps_dump["icons"] = icon_assigns
@@ -694,6 +721,16 @@ def process_verify_node(state: SessionState) -> dict[str, Any]:
     warnings: list[str] = []
     checklist: dict[str, Any] = {}
 
+    # validate_plan emits "auto-added canonical color=..." every time a slot
+    # lacks an explicit colour and build_v9 backfills it with the brand
+    # default — i.e. on every well-formed slide. These messages are
+    # informational, not actionable, and inflate the warning count (11/21
+    # warnings on the 2026-06-04 live run were of this shape, dragging the
+    # verifier score down). Keep them in ``checklist`` for the UI summary
+    # but drop them from the deck-level warnings roll-up.
+    def _is_noise(msg: str) -> bool:
+        return "auto-added canonical" in msg or "применено canonical правило" in msg
+
     plan_slides = plan.get("slides") or []
     for idx, slide in enumerate(plan_slides, start=1):
         _, errs, warns = vp.validate_slide(idx, slide, donors)
@@ -702,7 +739,9 @@ def process_verify_node(state: SessionState) -> dict[str, Any]:
             "issues": [*errs, *warns],
         }
         blockers.extend(f"slide {idx}: {e}" for e in errs)
-        warnings.extend(f"slide {idx}: {w}" for w in warns)
+        warnings.extend(
+            f"slide {idx}: {w}" for w in warns if not _is_noise(w)
+        )
 
     # 2. Roll in Brand Guardian fails as blockers.
     brand_verdict = brand.get("verdict", "WARN")

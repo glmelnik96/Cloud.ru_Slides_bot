@@ -1,104 +1,147 @@
 """Agent 04 — Layout Designer (DeepSeek-V4-Pro).
 
-Picks donor `layout_idx` (1..101) from Cloud.ru template for each slide
+Picks donor ``layout_idx`` from the Cloud.ru template for each slide
 classified by Agent 02. Applies anti-monotony (no 3-in-a-row same donor).
-DeepSeek terse style — lookup table embedded, no reasoning preamble.
+
+The donor lookup table is generated from
+``skill_assets/brand/donor-slot-map.yaml`` at import time so the prompt
+always matches the actual template + slot map. The previous hand-written
+table referenced template indices that didn't exist (1, 9, 25-as-text,
+69, 94...) and caused every live deck to render with template defaults
+where body content should have been.
 """
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import Any
 
+from graph import donor_map
 from llm.prompts._shared import JSON_ONLY_FOOTER, LANGUAGE_RULE
 
 
-# Default donor table — extracted from `skill_assets/agents_reference/04-layout-designer.md`
-# §"Category → Default idx mapping". Embedded in the prompt so DeepSeek
-# doesn't need extra context fetch. Source of truth at runtime is
-# `skill_assets/brand/donor-slot-map.yaml` — orchestrator validates.
-DONOR_TABLE = """\
-| category               | default | alternatives    |
-| title                  | 1       | 6,8,54          |
-| divider                | 9       | 55,10           |
-| text                   | 25      | 28,34,67        |
-| multicolumn:2col       | 69      | 26              |
-| multicolumn:3col       | 32      | 73              |
-| multicolumn:4blocks    | 29      | 70              |
-| multicolumn:4subtitles | 30      | 71              |
-| multicolumn:6blocks    | 31      | 72              |
-| multicolumn:8blocks    | 33      | 74              |
-| image:text+image       | 34      | 76,88           |
-| image:half             | 45      | 48,88           |
-| image:full             | 47      | —               |
-| image:illustration_half| 46      | 89              |
-| image:photo_full       | 90      | 92,93,95        |
-| image:3-4_pictures     | 41      | 79,87           |
-| image:screenshot       | 21      | 22,23           |
-| team_3                 | 52      | 86              |
-| team_4                 | 51      | 85              |
-| team_5                 | 50      | 84              |
-| team_10                | 49      | 83              |
-| timeline:≤8            | 40      | 78              |
-| timeline:9-10          | 39      | 77              |
-| table                  | 36      | —               |
-| callout:white          | 24      | —               |
-| callout:dark           | 68      | —               |
-| pattern_bg             | 14-20   | 59-66           |
-| logo                   | 94      | 96              |
-"""
+def _build_donor_table() -> str:
+    """Markdown-ish table of every valid donor: idx | category | hint | max_chars.
 
-# Tone groups for anti-monotony rotation (≤2 same idx in sequence).
-TONE_GROUPS = """\
-light_content:  [22, 29, 30, 32, 35, 43]
-dark_content:   [23, 42, 58, 68]
-green_accent:   [9, 13, 26, 96]
-divider_set:    [10, 13, 14]
-kpi_set:        [44, 45]
-title_set:      [5, 6, 7, 8, 9]
-"""
+    One line per donor — kept compact so DeepSeek can scan it inline.
+    """
+    rows = donor_map.donor_summary()
+    lines = [
+        "| idx | category               | max_chars | use_when |",
+        "|-----|------------------------|-----------|----------|",
+    ]
+    for r in rows:
+        cat = r["category"][:24].ljust(22)
+        uw = (r["use_when"] or r["description"])[:80].replace("|", "/")
+        lines.append(f"| {r['idx']:>3} | {cat} | {r['max_chars']:>9} | {uw} |")
+    return "\n".join(lines)
 
 
-SYSTEM = f"""\
-Ты — подборщик donor-слайдов из шаблона Cloud.ru. Вход: DeckClassification (категории и hint). Выход: LayoutPlan — donor (1..101) на каждый слайд.
+def _build_category_map() -> str:
+    """SlideCategory → canonical donor candidates derived from the YAML.
+
+    Format: ``category | candidates`` where candidates is a comma-separated
+    list of valid donor indices the designer may pick from.
+    """
+    eq = donor_map.category_equivalence()
+    bridge = {
+        "title":       ("title_open", "title_dark"),
+        "divider":     ("divider",),
+        "text":        ("content_text",),
+        "multicolumn (default 2col)":  ("content_2col",),
+        "multicolumn (3col)":          ("content_3col",),
+        "multicolumn (4block)":        ("content_4block",),
+        "image (grid/cards)":          ("image_grid",),
+        "image (main/photo)":          ("image_main",),
+        "image (screenshot)":          ("screenshot",),
+        "callout":     ("callout",),
+        "kpi (native preferred)":      ("kpi",),
+        "table":       ("table",),
+        "timeline":    ("timeline",),
+        "logo (final)":                ("logo_finale",),
+    }
+    lines = ["| classifier category       | valid donors |", "|---|---|"]
+    for label, buckets in bridge.items():
+        ids: list[int] = []
+        for b in buckets:
+            ids.extend(eq.get(b, []))
+        # Dedupe preserving order.
+        seen: set[int] = set()
+        ids = [i for i in ids if not (i in seen or seen.add(i))]
+        lines.append(f"| {label} | {', '.join(map(str, ids)) or '—'} |")
+    return "\n".join(lines)
+
+
+def _build_tone_groups() -> str:
+    tg = donor_map.tone_groups()
+    return "\n".join(f"{k}: {v}" for k, v in tg.items())
+
+
+@lru_cache(maxsize=1)
+def _build_system_prompt() -> str:
+    """Lazily compose the SYSTEM prompt.
+
+    Reads ``donor-slot-map.yaml`` on first call only — keeps module import
+    side-effect-free so containers that lack ``skill_assets/`` (e.g. the
+    bot, which only needs Celery task registration) can still import the
+    pipeline graph without crashing.
+    """
+    donor_table = _build_donor_table()
+    category_map = _build_category_map()
+    tone_groups = _build_tone_groups()
+    valid_ids = sorted(donor_map.valid_donor_ids())
+    return f"""\
+Ты — подборщик donor-слайдов из шаблона Cloud.ru. Вход: DeckClassification (категории и subcategory_hint). Выход: LayoutPlan — donor (layout_idx) на каждый слайд.
 
 ВЫХОД:
 {{
   slides: [
     {{
       num: number,
-      layout_idx: number,            // donor 1..101 (имя поля strictly "layout_idx")
-      layout_name: string,           // короткое имя по таблице ("multicolumn 4blocks")
+      layout_idx: number,            // donor — ТОЛЬКО из списка валидных (см. ниже)
+      layout_name: string,           // короткое имя по таблице
       rationale: string,             // 1 фраза
-      slot_styles_override: object   // {{}} если не нужно; иначе локальные правки стилей
+      slot_styles_override: object   // {{}} если не нужно
     }}
   ]
 }}
 
-ТАБЛИЦА КАТЕГОРИЯ → DONOR (используй default, alternatives — для anti-monotony):
-{DONOR_TABLE}
+ВАЛИДНЫЕ DONOR-ИНДЕКСЫ (использовать ТОЛЬКО эти):
+{valid_ids}
+Любой другой layout_idx = ошибка. Слайды 1, 2, 3, 9 — это служебные слайды самого шаблона ("Шаблон презентации", "Привет!", "Содержание", "Слайды-Разделители"), их НЕЛЬЗЯ выбирать.
 
-ТОНОВЫЕ ГРУППЫ (для чередования):
-{TONE_GROUPS}
+КАТЕГОРИЯ → КАНДИДАТЫ (выбирай из перечисленных):
+{category_map}
+
+ПОЛНАЯ ТАБЛИЦА ДОНОРОВ (idx, category, max_chars, use_when):
+{donor_table}
+
+ТОНОВЫЕ ГРУППЫ (для anti-monotony):
+{tone_groups}
 
 ANTI-MONOTONY (детерминированно):
 - НЕ ставь один и тот же layout_idx 3 раза подряд.
-- Если 2 предыдущих слайда уже того же idx → возьми alternative из таблицы или соседний idx из tone-группы.
+- Если 2 предыдущих слайда уже того же idx → возьми другого кандидата из той же категории или соседний idx из tone-группы.
 - Чередуй light/dark: ≤40% тёмных слайдов в колоде.
 
-КАНОНИЧЕСКИЕ ПРАВИЛА (НЕ нарушай):
-- НИКОГДА не выбирай layout_idx=101 (deprecated "clear").
-- Команда (team): donor подбирается по числу людей (3→52, 4→51, 5→50, 10→49); НЕ растягивай контент.
-- KPI native (slide_type=kpi_native) → layout_idx по умолчанию 44 (или 45 для dark).
-- chart_pptx_native / table_native / flow_diagram_native / image_native → НЕ нужен donor: ставь layout_idx=0 и в rationale "native render — donor not applicable". Оркестратор обработает.
+ЖЁСТКИЕ ПРАВИЛА (нарушение = брак):
+- НЕ используй donor 25 (logo_green_caption / "Спасибо за внимание") для слайдов категории "text" или "multicolumn" — он только для ФИНАЛЬНОГО логослайда.
+- НЕ используй donor 78 / 86 нигде кроме самого последнего слайда (logo finale).
+- НЕ выбирай donor НЕ из VALID_IDS — оркестратор это отбросит и подставит дефолт.
+- Категория "title" → donor 4 (белый) или 6/7 (тёмный) — НЕ donor 1 (это не донор, это титул шаблона).
+- Категория "divider" → donor 12 (зелёный) / 13 (тёмный) / 10 (alt green) / 62 — НЕ donor 9 (это не донор).
+- Категория "logo" → donor 25 ИЛИ donor 78 (с продуктовой выкладкой) ИЛИ donor 86 (фото-финал) — только в самом конце.
+- KPI native (slide_type=kpi_native) → layout_idx по умолчанию 43 (light) или 44 (dark).
+- chart_pptx_native / table_native / flow_diagram_native / image_native → layout_idx=0, rationale="native render".
 
-SLOT_STYLES_OVERRIDE (заполняй ТОЛЬКО при необходимости):
-- {{"size_pt": <int>}} — если канонический размер не подходит (overflow); минимум 12pt, никогда меньше.
-- {{"remove_shapes": [<ph_idx>]}} — если плейсхолдер не нужен на этом слайде.
-- Цвета НЕ менять — color = #222222 (графит) на светлом, белый на тёмном; зелёного текста не бывает.
+SLOT_STYLES_OVERRIDE (только при необходимости):
+- {{"size_pt": <int>}} — если канонический размер не подходит (overflow); минимум 12pt.
+- {{"remove_shapes": [<ph_idx>]}} — если плейсхолдер не нужен.
+- Цвета НЕ менять.
 
-OVERFLOW STRATEGY (выбирай первый подходящий):
-1) Donor с большим safe_max_chars в той же группе.
-2) Split — но split уже сделан Агентом 02; если всё ещё переполнено — note в rationale.
+OVERFLOW STRATEGY:
+1) Donor с большим max_chars в той же категории.
+2) Split уже сделан Агентом 02; если всё ещё переполнено — note в rationale.
 3) Понизь размер в slot_styles_override (≥12pt).
 
 {LANGUAGE_RULE}
@@ -109,9 +152,9 @@ OVERFLOW STRATEGY (выбирай первый подходящий):
 def build_messages(classification: dict[str, Any]) -> list[dict[str, Any]]:
     user = (
         f"CLASSIFICATION={json.dumps(classification, ensure_ascii=False)}\n\n"
-        "Подбери donor для каждого слайда. Применяй anti-monotony."
+        "Подбери donor для каждого слайда. ТОЛЬКО валидные индексы. Применяй anti-monotony."
     )
     return [
-        {"role": "system", "content": SYSTEM},
+        {"role": "system", "content": _build_system_prompt()},
         {"role": "user", "content": user},
     ]

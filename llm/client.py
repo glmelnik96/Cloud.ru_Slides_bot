@@ -112,6 +112,11 @@ class LLMResult:
     prompt_tokens: int
     completion_tokens: int
     elapsed_s: float
+    # Canonical OpenAI completion finish_reason — "stop", "length",
+    # "content_filter", "tool_calls". Used by call_and_parse to detect
+    # truncation and auto-bump max_tokens on the next retry. Default
+    # "stop" keeps test cassettes that construct LLMResult by hand valid.
+    finish_reason: str = "stop"
 
 
 def _merge_extra_body(spec: RoleSpec, override: dict[str, Any] | None) -> dict[str, Any]:
@@ -216,9 +221,11 @@ def call_role(call: LLMCall) -> LLMResult:
         temperature=spec.temperature,
         extra_body=extra_body,
     )
-    msg = resp.choices[0].message
+    choice = resp.choices[0]
+    msg = choice.message
     content = (msg.content or "").strip()
     reasoning = (getattr(msg, "reasoning", None) or "").strip()
+    finish_reason = getattr(choice, "finish_reason", "stop") or "stop"
     usage = resp.usage
     result = LLMResult(
         role=call.role,
@@ -228,6 +235,7 @@ def call_role(call: LLMCall) -> LLMResult:
         prompt_tokens=getattr(usage, "prompt_tokens", 0),
         completion_tokens=getattr(usage, "completion_tokens", 0),
         elapsed_s=elapsed,
+        finish_reason=finish_reason,
     )
     logger.info(
         "llm.call.done",
@@ -238,6 +246,7 @@ def call_role(call: LLMCall) -> LLMResult:
         completion_tokens=result.completion_tokens,
         reasoning_len=len(reasoning),
         content_len=len(content),
+        finish_reason=finish_reason,
     )
     return result
 

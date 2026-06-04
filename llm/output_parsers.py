@@ -15,7 +15,28 @@ import structlog
 from pydantic import BaseModel, ValidationError
 
 from llm.client import LLMCall, LLMResult, call_role
-from llm.roles import Role
+from llm.roles import ROLES, Role
+
+
+# Hard ceiling on auto-bumped max_tokens. Beyond this we accept the
+# failure rather than burn more cost on a likely-broken role/prompt.
+# 24000 = 3× the largest static budget (VISUAL_VERIFIER=12000) — enough
+# headroom for the worst reasoning-trace explosion we've seen on Kimi
+# vision, but bounded so a misconfigured prompt can't spend unbounded.
+_TRUNCATION_TOKENS_CEILING = 24000
+
+
+def _is_truncated(result: LLMResult) -> bool:
+    """True if the call ran out of token budget mid-output.
+
+    Two signals, either is sufficient:
+      • ``finish_reason == "length"`` — canonical OpenAI cap-hit marker.
+      • Empty content — Kimi vision sometimes spends the entire budget on
+        reasoning and emits zero content tokens. ``finish_reason`` is then
+        also "length" but we keep the empty-content check as a belt-and-
+        braces for providers that mis-report finish_reason.
+    """
+    return result.finish_reason == "length" or not result.content.strip()
 
 logger = structlog.get_logger(__name__)
 
@@ -91,14 +112,31 @@ def call_and_parse(
     msgs = [dict(m) for m in messages]
     last_err: Exception | None = None
     last_result: LLMResult | None = None
-    for attempt in range(max_retries + 1):
-        result = call_role(LLMCall(role=role, messages=msgs, images=list(images or [])))
+    tokens_override: int | None = None
+    # One-shot truncation auto-bump that does NOT consume a feedback-style
+    # retry. Rationale: appending an empty/truncated assistant reply and a
+    # "fix your JSON" user turn is useless when the cap is the real problem
+    # — the next attempt will just truncate at the same point. So when we
+    # detect truncation we double the budget and re-issue the SAME prompt.
+    bumped = False
+    attempt = 0
+    while True:
+        result = call_role(LLMCall(
+            role=role,
+            messages=msgs,
+            images=list(images or []),
+            max_tokens_override=tokens_override,
+        ))
         last_result = result
         try:
             data = parse_json_or_raise(result.content)
             model = model_cls.model_validate(data)
-            if attempt > 0:
-                logger.info("llm.parse.retry_ok", role=role.value, attempt=attempt)
+            if attempt > 0 or bumped:
+                logger.info(
+                    "llm.parse.retry_ok",
+                    role=role.value, attempt=attempt, bumped=bumped,
+                    tokens=tokens_override or ROLES[role].max_tokens,
+                )
             return model, result
         except (ValueError, ValidationError) as e:
             last_err = e
@@ -106,12 +144,38 @@ def call_and_parse(
                 "llm.parse.fail",
                 role=role.value,
                 attempt=attempt,
+                bumped=bumped,
+                finish_reason=result.finish_reason,
+                content_len=len(result.content),
                 error=str(e)[:300],
                 content_head=result.content[:200],
             )
+            # Truncation auto-bump — runs at most once per call_and_parse.
+            if not bumped and _is_truncated(result):
+                current = tokens_override or ROLES[role].max_tokens
+                new_tokens = min(current * 2, _TRUNCATION_TOKENS_CEILING)
+                if new_tokens > current:
+                    bumped = True
+                    tokens_override = new_tokens
+                    logger.warning(
+                        "llm.parse.bump_tokens",
+                        role=role.value,
+                        from_tokens=current,
+                        to_tokens=new_tokens,
+                        reason=("length" if result.finish_reason == "length" else "empty_content"),
+                    )
+                    continue  # same prompt, larger budget — does NOT consume attempt
+                # Already at ceiling: fall through to feedback retry / break.
+                logger.warning(
+                    "llm.parse.bump_ceiling_hit",
+                    role=role.value, tokens=current, ceiling=_TRUNCATION_TOKENS_CEILING,
+                )
+
             if attempt >= max_retries:
                 break
+            attempt += 1
             # Feedback turn — append assistant's bad output + user correction.
+            # Only useful when content is non-empty (schema error, not truncation).
             feedback = (
                 "Предыдущий ответ невалиден по схеме. Ошибка: "
                 f"{type(e).__name__}: {str(e)[:500]}.\n"

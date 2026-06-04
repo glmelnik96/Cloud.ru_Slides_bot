@@ -66,7 +66,10 @@ ROLES: dict[Role, RoleSpec] = {
         # Kimi vision — reasoning ~7-9k chars (counted under completion_tokens
         # per cloudru_fm_api.md). Need room for both reasoning + Brief JSON
         # of up-to-20-slide deck. 3500 caused content truncation on 8+ slides.
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=8000, requires_vision=True),
+        # 2026-06-04 live: 14-slide deck → reasoning ate entire 8000-token
+        # budget, model never emitted content (empty content, both retries).
+        # 12000 mirrors VISUAL_VERIFIER which handles 15-slide decks safely.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=12000, requires_vision=True),
     Role.CLASSIFIER:
         # Per-deck DeckClassification with optional native blocks
         # (kpi/table/flow can be large). Empirically a 15-slide deck with
@@ -74,7 +77,11 @@ ROLES: dict[Role, RoleSpec] = {
         RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=4000),
     Role.DISTRIBUTOR:
         # Per-deck ContentAssignment, GLM OFF for nested-JSON stability.
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500, extra_body=_GLM_THINKING_OFF),
+        # 2500 truncated mid-string on a 15-slide deck (Unterminated string
+        # at pos 9363 on 2026-06-04 live run). Russian Cyrillic content +
+        # per-placeholder diff strings push output past 8KB on big decks.
+        # Bump to 6000 — same envelope as INFOGRAPHIC_MAKER.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=6000, extra_body=_GLM_THINKING_OFF),
     Role.DESIGNER:
         # LayoutPlan over the deck; DeepSeek terse table-lookup style.
         RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=2000),
