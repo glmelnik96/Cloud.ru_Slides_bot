@@ -48,8 +48,12 @@ VisionImage = str | bytes | Path
 def _encode_image(image: VisionImage) -> str:
     """Return a `data:` URL or pass-through HTTP URL for an `image_url` block."""
     if isinstance(image, str):
-        # Already a URL (data: or http(s):) — pass through.
-        return image
+        # Pass through if it's already a URL Cloud.ru accepts. Otherwise treat
+        # as a filesystem path — state.artefacts roundtrips through JSON
+        # (RedisSaver), so a Path stored upstream becomes a string here.
+        if image.startswith(("data:", "http://", "https://", "file://")):
+            return image
+        image = Path(image)
     if isinstance(image, Path):
         data = image.read_bytes()
         # Sniff extension for the MIME hint; default to png.

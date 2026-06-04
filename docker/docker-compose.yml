@@ -68,6 +68,17 @@ services:
     container_name: slides-bot-bot
     restart: unless-stopped
     env_file: ../.env
+    environment:
+      # Shared input-deck dir mounted into the worker at the same path. Without
+      # this, parse_node in the worker container can't see the .pptx the bot
+      # downloaded — each container has its own /tmp.
+      SLIDESBOT_INPUTS_DIR: /var/lib/slidesbot/inputs
+      # Per-session workdir lives on a shared volume too so the bot can read
+      # result.pptx for send_document on terminal DONE.
+      SLIDESBOT_WORKDIR: /var/lib/slidesbot/sessions
+    volumes:
+      - slidesbot-inputs:/var/lib/slidesbot/inputs
+      - slidesbot-sessions:/var/lib/slidesbot/sessions
     depends_on:
       redis:
         condition: service_healthy
@@ -82,6 +93,12 @@ services:
     container_name: slides-bot-worker
     restart: unless-stopped
     env_file: ../.env
+    environment:
+      SLIDESBOT_INPUTS_DIR: /var/lib/slidesbot/inputs
+      SLIDESBOT_WORKDIR: /var/lib/slidesbot/sessions
+    volumes:
+      - slidesbot-inputs:/var/lib/slidesbot/inputs
+      - slidesbot-sessions:/var/lib/slidesbot/sessions
     depends_on:
       redis:
         condition: service_healthy
@@ -99,3 +116,9 @@ networks:
 volumes:
   redis-data:
   minio-data:
+  # Shared between bot and worker so the bot's downloaded .pptx is visible
+  # to the worker's parse_node. Goes away with M5 (S3 transit).
+  slidesbot-inputs:
+  # Worker writes per-session artefacts (plan.json, built.pptx, result.pptx,
+  # pngs/) here; bot reads result.pptx for send_document on DONE.
+  slidesbot-sessions:

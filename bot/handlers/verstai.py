@@ -7,6 +7,7 @@ path (worker and bot share the same machine in M3).
 """
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -34,7 +35,16 @@ _MAX_PPTX_BYTES = 20 * 1024 * 1024
 
 # Shared root with worker-side _session_workdir (graph.nodes.pipeline) so the
 # orchestrator can place plan.json / built.pptx / pngs alongside the input.
-_INPUTS_ROOT = Path(tempfile.gettempdir()) / "slidesbot" / "inputs"
+#
+# Bot and worker live in *different* containers in prod — the path that the
+# bot writes to must be visible to the worker. The Docker Compose file mounts
+# a named volume at `/var/lib/slidesbot/inputs` in both containers and sets
+# `SLIDESBOT_INPUTS_DIR` to that path; on the host (live_run, tests) the env
+# var is unset and we fall back to OS temp.
+_INPUTS_ROOT = Path(
+    os.environ.get("SLIDESBOT_INPUTS_DIR")
+    or (Path(tempfile.gettempdir()) / "slidesbot" / "inputs")
+)
 
 
 def _find_document(msg: Message) -> Document | None:

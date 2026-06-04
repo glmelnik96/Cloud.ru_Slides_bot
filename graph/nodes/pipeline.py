@@ -14,6 +14,7 @@ tracked by inline FIXME(next-chunk) comments.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -206,6 +207,61 @@ def _sanitize_native_block(slide_type: str, key: str, block: Any) -> Any:
     return block
 
 
+def _native_block_is_usable(slide_type: str, cls: dict[str, Any]) -> bool:
+    """True iff the classifier supplied enough data for build_v9 to render
+    the native ``slide_type`` without crashing.
+
+    Build_v9 raises ValueError on empty headers/data/series — that takes down
+    the whole pipeline. Detecting it here lets ``assemble_plan_node`` skip
+    just the offending slide and keep the rest of the deck.
+
+    Empirical: Agent 02 (Slide Classifier) sometimes picks ``table_native``
+    for a slide where the source draft has no tabular data, leaving the
+    ``table`` block as ``{"header": "…", "subtitle": "", "style": "…"}``
+    with no ``headers`` / ``data``. Same pattern observed for chart_pptx and
+    kpi natives.
+    """
+    if slide_type == "table_native":
+        tbl = cls.get("table") or {}
+        if not isinstance(tbl, dict):
+            return False
+        if not (tbl.get("headers") or []):
+            return False
+        if not (tbl.get("data") or []):
+            return False
+        return True
+    if slide_type == "chart_pptx_native":
+        chart = cls.get("chart") or {}
+        if not isinstance(chart, dict):
+            return False
+        if not (chart.get("series") or []):
+            return False
+        return True
+    if slide_type == "kpi_native":
+        kpi = cls.get("kpi") or {}
+        if not isinstance(kpi, dict):
+            return False
+        if not (kpi.get("numbers") or []):
+            return False
+        return True
+    if slide_type == "flow_diagram_native":
+        flow = cls.get("flow") or {}
+        if not isinstance(flow, dict):
+            return False
+        if not (flow.get("blocks") or []):
+            return False
+        return True
+    if slide_type == "image_native":
+        img = cls.get("image") or {}
+        if not isinstance(img, dict):
+            return False
+        if not (img.get("image_path") or img.get("path")):
+            return False
+        return True
+    # Unknown slide_type → let build_v9 try; if it crashes we'll widen this.
+    return True
+
+
 def _by_num(items: list[dict[str, Any]], key: str = "num") -> dict[int, dict[str, Any]]:
     """Index a list of slide-shaped dicts by their slide number key.
 
@@ -280,6 +336,14 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
             if slide_type:
                 # Native route — carry the matching data block straight from
                 # classification (Agent 02 produces typed blocks per slide_type).
+                # Skip if the classifier under-filled the native block — better
+                # to lose one slide than crash the whole deck inside build_v9.
+                if not _native_block_is_usable(slide_type, cls):
+                    logger.warning("node.assemble.native_block_empty",
+                                   session_id=state.session_id,
+                                   num=num, slide_type=slide_type)
+                    skipped.append(num)
+                    continue
                 kwargs: dict[str, Any] = {
                     "slide_type": slide_type,
                     "dark": bool(cls.get("dark", False)),
@@ -358,13 +422,18 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
 # ─── build_node — skeleton ───────────────────────────────────────────────────
 
 def _session_workdir(session_id: str) -> Path:
-    """Per-session scratch dir under the system temp root.
+    """Per-session scratch dir.
 
     Created lazily; not cleaned up between nodes so subsequent nodes
     (build → brand → render) can share artefacts on disk. The worker's
     session-end cleanup hook (M3 close-out) will own teardown.
+
+    Honors ``SLIDESBOT_WORKDIR`` so bot and worker containers can share
+    a volume — without this the worker writes ``result.pptx`` to its own
+    ``/tmp`` and the bot's send_document on terminal DONE can't see it.
     """
-    d = Path(tempfile.gettempdir()) / "slidesbot" / session_id
+    root = os.environ.get("SLIDESBOT_WORKDIR") or str(Path(tempfile.gettempdir()) / "slidesbot")
+    d = Path(root) / session_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
