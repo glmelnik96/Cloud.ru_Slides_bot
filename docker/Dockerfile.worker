@@ -27,6 +27,9 @@ COPY llm ./llm
 COPY schemas ./schemas
 COPY storage ./storage
 COPY renderers ./renderers
+# Vendored slide-build skill (scripts + brand + dictionaries + .pptx donor
+# template). Required by skill_bridge.install() — worker fails fast without it.
+COPY skill_assets ./skill_assets
 
 CMD ["celery", "-A", "worker.celery_app", "worker", \
      "--loglevel=INFO", \
