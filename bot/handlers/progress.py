@@ -13,13 +13,14 @@ import asyncio
 import contextlib
 import json
 import time
+from pathlib import Path
 from typing import Awaitable, Callable
 
 import structlog
 from pydantic import ValidationError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 from bot.i18n.progress import format_progress, format_terminal
@@ -99,6 +100,21 @@ async def subscribe(app: Application, *, session_id: str, chat_id: int,
                 text = format_terminal(event.stage, event.error)
                 await _edit(app, chat_id=chat_id, message_id=message_id,
                             text=text, keyboard=None)
+                # On DONE, ship the built .pptx back to the user. Best-effort:
+                # any Telegram or filesystem error is logged but does not break
+                # the subscriber lifecycle.
+                if event.stage == "done" and event.result_path:
+                    try:
+                        p = Path(event.result_path)
+                        with p.open("rb") as f:
+                            await app.bot.send_document(
+                                chat_id=chat_id,
+                                document=f,
+                                filename=p.name,
+                            )
+                    except (OSError, TelegramError) as e:
+                        log.warning("progress.send_document_failed",
+                                    error=str(e), path=event.result_path)
                 if on_terminal is not None:
                     with contextlib.suppress(Exception):
                         await on_terminal(event)

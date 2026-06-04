@@ -41,13 +41,14 @@ def stage(session_id: str, stage_: Stage, pct: int, detail: str = "") -> None:
     ))
 
 
-def done(session_id: str, detail: str = "") -> None:
+def done(session_id: str, detail: str = "", result_path: str | None = None) -> None:
     publish(ProgressEvent(
         session_id=session_id,
         stage=Stage.DONE.value,
         progress_pct=100,
         detail=detail,
         terminal=True,
+        result_path=result_path,
     ))
 
 

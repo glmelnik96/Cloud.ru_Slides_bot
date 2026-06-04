@@ -2,26 +2,19 @@
 
 Pairs with ``test_pipeline_smoke.py`` (which covers the deterministic,
 script-wrapping half). Together they let us validate the whole v0.9 batch
-flow end-to-end without a live Cloud.ru API key:
+flow end-to-end without a live Cloud.ru API key.
 
-    parse_node                ← test_pipeline_smoke
-    brief_node                ← here (cassette: 01_brief)
-    classify_node             ← here (cassette: 02_classifier)
-    design_node               ← here (cassette: 04_designer)
-    distribute_node           ← NOT covered (no artifact captured yet)
-    icons_node                ← NOT covered (no artifact captured yet)
-    infographic_node          ← NOT covered (failing artifact, schema bug TODO)
-    copyedit_node             ← here (cassette: 07_copyedit)
-    assemble_plan_node …      ← test_pipeline_smoke
-    visual_verify_node        ← NOT covered (failing artifact, schema bug TODO)
+All 8 LLM agents are covered (01, 02, 03, 04, 05, 06, 07, 10). Cassettes
+come from ``tests/probes/_artifacts/{agent_label}_{size}.txt``, captured
+by the WS-E probe runner. Cassettes are real model responses — they are
+the closest thing to "production traffic" we can put in unit tests.
 
-The four covered nodes are the ones with valid captured artifacts from the
-WS-E probe run. Distributor / Icon Picker probes never produced artifacts;
-Infographic Maker / Visual Verifier produced malformed JSON we need to chase
-in a separate prompt-tuning chunk.
+The ``visual_verify_node`` test feeds it through the parse → assemble half
+of the graph, since it requires a Plan + rendered PNG paths in artefacts.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,13 +24,22 @@ from graph.nodes.agents import (
     classify_node,
     copyedit_node,
     design_node,
+    distribute_node,
+    icons_node,
+    infographic_node,
+    visual_verify_node,
 )
 from llm.roles import Role
 from schemas.session import SessionInput, SessionState
-from schemas.slides import Brief, DeckClassification, LayoutPlan
+from schemas.slides import (
+    Brief,
+    DeckClassification,
+    LayoutPlan,
+    VisualVerdict,
+)
 from tests.integration.llm_cassettes import CassetteCallRole, load_cassette
 from tests.probes import fixtures
-from tests.probes._wrappers import DeckContent
+from tests.probes._wrappers import DeckContent, DeckIcons, DeckInfographics
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -156,3 +158,98 @@ def test_copyedit_node_cassette(monkeypatch):
     assert len(edited.slides) >= 10
     # Copy Editor must populate edits_count (it's how Process Verifier scores).
     assert all(s.edits_count >= 0 for s in edited.slides)
+
+
+# ─── 03 Content Distributor ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("size", ["small", "medium", "big"])
+def test_distribute_node_cassette(monkeypatch, size: str):
+    """Real GLM-OFF distributor response → DeckContent under content."""
+    arts = {
+        "brief": fixtures.make_brief(size),
+        "classification": fixtures.make_classification(size),
+        "layouts": fixtures.make_layouts(size),
+    }
+    state = _make_state(f"c-dist-{size}", arts)
+
+    cassette = CassetteCallRole({Role.DISTRIBUTOR: load_cassette("03_distributor", size)})
+    monkeypatch.setattr("llm.output_parsers.call_role", cassette)
+
+    patch = distribute_node(state)
+    content = DeckContent.model_validate(patch["artefacts"]["content"])
+    assert content.slides, f"distributor[{size}]: empty slides list"
+    # Native slides (kpi/chart/table/flow) legitimately have empty
+    # placeholder_assignments — Distributor skips them per its prompt. So
+    # just assert at least one donor slide carries content.
+    assert any(s.placeholder_assignments for s in content.slides), \
+        f"distributor[{size}]: no slide carries placeholder content"
+
+
+# ─── 05 Icon Picker ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("size", ["small", "medium", "big"])
+def test_icons_node_cassette(monkeypatch, size: str):
+    """Real GLM-OFF icon-picker response → DeckIcons under icons."""
+    arts = {
+        "classification": fixtures.make_classification(size),
+        "content": fixtures.make_content(size),
+    }
+    state = _make_state(f"c-icons-{size}", arts)
+
+    cassette = CassetteCallRole({Role.ICON_PICKER: load_cassette("05_icons", size)})
+    monkeypatch.setattr("llm.output_parsers.call_role", cassette)
+
+    patch = icons_node(state)
+    icons = DeckIcons.model_validate(patch["artefacts"]["icons"])
+    assert icons.slides, f"icon picker[{size}]: empty slides list"
+
+
+# ─── 06 Infographic Maker ────────────────────────────────────────────────────
+
+def test_infographic_node_cassette(monkeypatch):
+    """Real GLM-OFF infographic-maker response → DeckInfographics under infographics."""
+    arts = {
+        "classification": fixtures.make_classification("big"),
+        "content": fixtures.make_content("big"),
+    }
+    state = _make_state("c-info", arts)
+
+    cassette = CassetteCallRole({Role.INFOGRAPHIC_MAKER: load_cassette("06_infographic", "big")})
+    monkeypatch.setattr("llm.output_parsers.call_role", cassette)
+
+    patch = infographic_node(state)
+    infos = DeckInfographics.model_validate(patch["artefacts"]["infographics"])
+    # The cassette covers a few slides where the big-deck classifier asked for
+    # infographics. Just assert the shape is right — not every slide gets one.
+    assert isinstance(infos.slides, list)
+
+
+# ─── 10 Visual Verifier ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("size", ["small", "medium", "big"])
+def test_visual_verify_node_cassette(monkeypatch, tmp_path: Path, size: str):
+    """Real Kimi-vision visual-verifier response → VisualVerdict under visual_verdict.
+
+    The node only runs when ``rendered_pngs`` are present in artefacts —
+    we drop in a placeholder PNG (Kimi tolerates) and a synthetic Plan.
+    """
+    plan = fixtures.make_plan(size)
+    placeholder = tmp_path / "slide-1.png"
+    # Minimal 1×1 PNG, mirrors brief_node's vision-gate placeholder.
+    placeholder.write_bytes(bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c6300010000000500010d0a2db40000000049454e44ae426082"
+    ))
+    arts = {
+        "plan": plan,
+        "rendered_pngs": [str(placeholder)],
+    }
+    state = _make_state(f"c-vv-{size}", arts)
+
+    cassette = CassetteCallRole({Role.VISUAL_VERIFIER: load_cassette("10_visual", size)})
+    monkeypatch.setattr("llm.output_parsers.call_role", cassette)
+
+    patch = visual_verify_node(state)
+    vv = VisualVerdict.model_validate(patch["artefacts"]["visual_verdict"])
+    assert vv.llm_verdict in ("READY", "NEEDS_REWORK")
+    assert 0 <= vv.score_avg <= 5.0 or vv.score_avg == 0  # NEEDS_REWORK with 0 is fine

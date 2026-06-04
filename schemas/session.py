@@ -117,3 +117,8 @@ class ProgressEvent(BaseModel):
     terminal: bool = False
     # When the bot needs to inform the user about a failure or halt.
     error: str | None = None
+    # Optional artefact location surfaced on terminal DONE so the bot can
+    # send the built .pptx back to the user. M3 interim: local filesystem
+    # path (worker + bot share the same machine). M5 will swap this for an
+    # S3 key — the field name carries that intent.
+    result_path: str | None = None

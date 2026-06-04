@@ -174,6 +174,38 @@ def parse_node(state: SessionState) -> dict[str, Any]:
 _NATIVE_BLOCK_KEYS = ("kpi", "chart", "table", "flow", "image")
 
 
+def _sanitize_native_block(slide_type: str, key: str, block: Any) -> Any:
+    """Patch known shape mismatches between classifier output and vendored
+    renderers in skill_assets/scripts/.
+
+    These come from prompt-tuning gaps in Agent 02 — the right long-term
+    fix is to tighten the classifier system prompt and re-capture cassettes.
+    Until then, sanitize at the orchestration boundary so build_v9 has a
+    fighting chance:
+
+    * flow_diagram_native with ``grid=false`` AND no explicit x/y/w/h on any
+      block: force ``grid=true`` so ``flow_renderer.compose_grid`` derives
+      coords from row/col defaults. Blocks then stack but at least render.
+    """
+    if not isinstance(block, dict):
+        return block
+    if key == "flow" and slide_type == "flow_diagram_native":
+        blocks = block.get("blocks") or []
+        if not block.get("grid"):
+            has_coords = all(
+                isinstance(b, dict) and all(b.get(c) is not None for c in ("x", "y", "w", "h"))
+                for b in blocks
+            ) if blocks else False
+            if not has_coords:
+                block = dict(block)
+                block["grid"] = True
+                # cols default — flow_renderer derives from blocks if absent,
+                # but supplying a sane fallback avoids divide-by-zero edges.
+                if not block.get("cols"):
+                    block["cols"] = max(1, min(len(blocks), 4))
+    return block
+
+
 def _by_num(items: list[dict[str, Any]], key: str = "num") -> dict[int, dict[str, Any]]:
     """Index a list of slide-shaped dicts by their slide number key.
 
@@ -255,7 +287,7 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                 for k in _NATIVE_BLOCK_KEYS:
                     block = cls.get(k)
                     if block is not None:
-                        kwargs[k] = block
+                        kwargs[k] = _sanitize_native_block(slide_type, k, block)
                 ps = PlanSlide(**kwargs)
             else:
                 if not donor:
@@ -366,8 +398,21 @@ def build_node(state: SessionState) -> dict[str, Any]:
     workdir = _session_workdir(state.session_id)
     plan_path = workdir / "plan.json"
     out_path = workdir / "result.pptx"
+    # Strip explicit nulls before handing off to vendored build_v9. Several
+    # of its renderers do ``cfg.get("key", {})`` which only fires the default
+    # when the key is *absent* — an explicit ``null`` (which Pydantic emits
+    # for Optional fields with default=None) crashes them. Pydantic-level
+    # dump from assemble_plan_node carries those nulls; we drop them here at
+    # the boundary so the in-memory state stays canonical.
+    #
+    # by_alias=True ensures schema fields with Python-keyword aliases
+    # (FlowArrow.src→"from", FlowArrow.dst→"to") emit the JSON form that
+    # flow_renderer.py reads. Without this, arrows silently disappear.
+    plan_for_build = Plan.model_validate(plan).model_dump(
+        exclude_none=True, by_alias=True,
+    )
     with plan_path.open("w", encoding="utf-8") as f:
-        _json.dump(plan, f, ensure_ascii=False, indent=None)
+        _json.dump(plan_for_build, f, ensure_ascii=False, indent=None)
 
     build_v9.build(
         str(plan_path),
@@ -645,26 +690,31 @@ def process_verify_node(state: SessionState) -> dict[str, Any]:
 # ─── finalize_node — terminal ────────────────────────────────────────────────
 
 def finalize_node(state: SessionState) -> dict[str, Any]:
-    """Publish the terminal progress event and surface user-visible notes.
+    """Publish the terminal progress event with the built .pptx path so the
+    bot side can send the result to the user.
 
-    Real result delivery (S3 → Telegram document send) happens in the
-    bot's progress handler when it sees a terminal stage; this node only
-    finalises state for the worker.
+    M3 interim: ``result_path`` is a local filesystem path (worker and bot
+    share the same machine). M5 will swap this for an S3 key without
+    changing the field name.
     """
     arts = _artefacts(state)
     verdict = arts.get("verifier_verdict", {}).get("verdict", "NEEDS_REWORK")
+    built_path = arts.get("built_pptx_path") or state.result_s3_key
     notes = list(state.notes)
 
-    if verdict != "READY":
-        notes.append(
-            "[M3 draft] Pipeline доехал до конца, но финальные ноды "
-            "(parse/build/brand/render/verify) пока скелеты — результат не годен к выдаче."
-        )
-    else:
+    if verdict == "READY":
         notes.append("Готово")
+    elif verdict == "NEEDS_REWORK":
+        # Build still produced a .pptx — bot can deliver it with a caveat.
+        notes.append("Готов черновик, но верификатор просит доработку.")
 
-    progress.done(state.session_id, detail="готово" if verdict == "READY" else "draft")
-    logger.info("node.finalize.done", session_id=state.session_id, verdict=verdict)
+    progress.done(
+        state.session_id,
+        detail="готово" if verdict == "READY" else "draft",
+        result_path=built_path,
+    )
+    logger.info("node.finalize.done", session_id=state.session_id,
+                verdict=verdict, has_built=bool(built_path))
     return {
         "stage": Stage.DONE.value,
         "progress_pct": 100,
