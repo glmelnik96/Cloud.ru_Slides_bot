@@ -1,13 +1,19 @@
 """`/verstai` — enqueue a layout job.
 
-M2 scope: any invocation enqueues a fake pipeline (stub nodes) and shows live
-progress. Real .pptx ingestion lands in M3 together with the parsing node.
+M3 scope: the uploaded .pptx is downloaded to a local temp file and its path
+is threaded through ``SessionInput.input_s3_key`` for the worker. Real S3
+upload lands in M5; until then ``input_s3_key`` carries a local filesystem
+path (worker and bot share the same machine in M3).
 """
 from __future__ import annotations
+
+import tempfile
+from pathlib import Path
 
 import structlog
 from telegram import Document, Message, Update
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.handlers.progress import cancel_keyboard, start_subscriber
@@ -20,6 +26,15 @@ from schemas.session import Mode, SessionInput
 logger = structlog.get_logger(__name__)
 
 _PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+# Telegram Bot API caps document downloads at 20 MiB unless you run a local
+# Bot API server. Reject early with a clear message rather than letting the
+# download fail mid-stream.
+_MAX_PPTX_BYTES = 20 * 1024 * 1024
+
+# Shared root with worker-side _session_workdir (graph.nodes.pipeline) so the
+# orchestrator can place plan.json / built.pptx / pngs alongside the input.
+_INPUTS_ROOT = Path(tempfile.gettempdir()) / "slidesbot" / "inputs"
 
 
 def _find_document(msg: Message) -> Document | None:
@@ -48,22 +63,49 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_pptx(doc):
         await update.message.reply_text(VERSTAI_BAD_TYPE, parse_mode=ParseMode.HTML)
         return
+    if doc.file_size and doc.file_size > _MAX_PPTX_BYTES:
+        await update.message.reply_text(
+            f"Файл слишком большой ({doc.file_size / 1024 / 1024:.1f} МБ). "
+            f"Лимит Telegram Bot API — 20 МБ."
+        )
+        return
 
     inp = SessionInput(
         user_id=user.id,
         chat_id=chat_id,
         progress_message_id=0,  # filled in after we send the status message
         mode=Mode.VERSTAI,
-        # M3: download via context.bot.get_file(doc.file_id) → upload to S3 → set key.
-        # In M2 we accept the file as a UX signal but don't persist it yet.
+        # M5 will upload to S3 and set a real key here. M3 interim: download
+        # to a stable local path and pass the absolute path through this same
+        # field. parse_node (graph/nodes/pipeline.py) treats a non-empty value
+        # as a local path until S3 lands, so the field name doesn't churn.
         input_s3_key=None,
     )
 
+    # Claim the single-task lock BEFORE the download so a double-tap doesn't
+    # trigger two Telegram fetches.
     if not claim_user_lock(user.id, inp.session_id):
         await update.message.reply_text(
             "У вас уже идёт задача. Дождитесь её завершения или отмените."
         )
         return
+
+    # Download the .pptx before we enqueue — if Telegram throws we want to fail
+    # fast with a clear message instead of the worker discovering it later.
+    _INPUTS_ROOT.mkdir(parents=True, exist_ok=True)
+    local_path = _INPUTS_ROOT / f"{inp.session_id}.pptx"
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(custom_path=str(local_path))
+    except TelegramError as e:
+        release_user_lock(user.id, inp.session_id)
+        logger.exception("verstai.download_failed", error=str(e),
+                         session_id=inp.session_id, file_id=doc.file_id)
+        await update.message.reply_text(
+            "Не удалось скачать файл из Telegram. Попробуйте отправить ещё раз."
+        )
+        return
+    inp = inp.model_copy(update={"input_s3_key": str(local_path)})
 
     status_msg = await update.message.reply_text(
         format_progress("queued", 0, "ожидание воркера"),
