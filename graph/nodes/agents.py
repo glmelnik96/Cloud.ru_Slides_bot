@@ -142,11 +142,15 @@ def distribute_node(state: SessionState) -> dict[str, Any]:
     brief = arts["brief"]
     classification = arts["classification"]
     layouts = arts["layouts"]
-    # FIXME(next-chunk): build per-layout slot specs from
-    # skill_assets/brand/donor-slot-map.yaml. For now pass an empty mapping —
-    # GLM will fall back to category-based heuristics. Distributor still
-    # produces valid output, but capacity-aware overflow handling is degraded.
-    slot_specs: dict[str, Any] = {}
+    # Pull per-donor slot capacities from skill_assets/brand/donor-slot-map.yaml
+    # so GLM can fit copy to safe_max_chars. Native slides (layout_idx=0) are
+    # skipped — they don't have a donor and the distributor ignores them.
+    from graph import donor_map  # noqa: WPS433 — local import keeps cycle clear
+    layout_idxs = [
+        s.get("layout_idx") or s.get("donor") or 0
+        for s in (layouts.get("slides") or [])
+    ]
+    slot_specs = donor_map.slot_specs_for_layouts(layout_idxs)
 
     content, _ = call_and_parse(
         role=Role.DISTRIBUTOR,
@@ -187,11 +191,14 @@ class _DeckInfographics(BaseModel):
 def icons_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.DESIGNING, pct=55, detail="подбор иконок")
     arts = _artefacts(state)
-    # FIXME(next-chunk): scan skill_assets/brand/icons/ for available .svg files.
-    # For now use a minimal hard-coded list reflecting the only icon vendored
-    # in M2 (brand_arrow.svg). Icon Picker will likely return fallback=TODO
-    # for most blocks until the library is populated.
-    icon_library = ["icons/brand_arrow.svg"]
+    # Scan vendored SVGs. Currently only brand_arrow.svg ships with M2;
+    # Icon Picker will return fallback=TODO for most blocks until the
+    # library is populated (tracked outside M3).
+    from worker.skill_bridge import SKILL_BRAND  # noqa: WPS433
+    icons_dir = SKILL_BRAND / "icons"
+    icon_library = sorted(
+        f"icons/{p.name}" for p in icons_dir.glob("*.svg")
+    ) if icons_dir.is_dir() else []
 
     icons, _ = call_and_parse(
         role=Role.ICON_PICKER,
