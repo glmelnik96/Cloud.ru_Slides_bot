@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slides-bot"
+version = "0.1.0"
+description = "Telegram bot that wraps cloud-ru-slides skill on Cloud.ru FM models"
+requires-python = ">=3.10"
+dependencies = [
+    # Bot
+    "python-telegram-bot>=22.0,<23.0",
+    # Orchestration
+    "celery[redis]>=5.5,<5.6",
+    "langgraph>=0.2.50,<0.3",
+    "langgraph-checkpoint-redis>=0.0.6",
+    # LLM client
+    "openai>=2.0,<3.0",
+    # Validation / config
+    "pydantic>=2.7,<3.0",
+    "pydantic-settings>=2.4,<3.0",
+    # Storage
+    "redis>=5.0,<6.0",
+    "boto3>=1.35,<2.0",
+    # Rendering / file handling
+    "python-pptx>=1.0,<2.0",
+    "pillow>=10.4,<12.0",
+    "lxml>=5.2,<6.0",
+    "pyyaml>=6.0,<7.0",
+    # Skill scripts: matplotlib for legacy chart_native PNG renderer, docx for /brief mode
+    "matplotlib>=3.8,<4.0",
+    "python-docx>=1.1,<2.0",
+    # Observability
+    "structlog>=24.4,<25.0",
+    "prometheus-client>=0.21,<1.0",
+    "sentry-sdk>=2.14,<3.0",
+    # Utils
+    "tenacity>=9.0,<10.0",
+    "python-dotenv>=1.0,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "pytest-mock>=3.14,<4.0",
+    "ruff>=0.6,<1.0",
+    "mypy>=1.11,<2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bot*", "worker*", "graph*", "llm*", "renderers*", "storage*", "schemas*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: integration tests that hit live Cloud.ru FM API",
+]

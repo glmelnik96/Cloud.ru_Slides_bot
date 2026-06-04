@@ -1,0 +1,3 @@
+# Place SB Sans Display / Text / Interface .otf files here.
+# Files are baked into the worker image at build time.
+# Source: <vault>/01 Projects/Cloud.ru Slides Skill — type/SBSansDisplay-*.otf

@@ -1,0 +1,22 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# System deps kept minimal for the bot process — no soffice/fonts here.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
+
+COPY bot ./bot
+COPY worker ./worker
+COPY graph ./graph
+COPY llm ./llm
+COPY schemas ./schemas
+COPY storage ./storage
+
+CMD ["python", "-m", "bot.app"]

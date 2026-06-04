@@ -1,0 +1,35 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# LibreOffice + pdftoppm for slide rendering, fontconfig for SB Sans.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-impress \
+        libreoffice-core \
+        poppler-utils \
+        fontconfig \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Brand fonts — bind into the system font path so soffice picks them up.
+COPY docker/fonts/ /usr/share/fonts/truetype/sbsans/
+RUN fc-cache -fv
+
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
+
+COPY worker ./worker
+COPY graph ./graph
+COPY bot ./bot
+COPY llm ./llm
+COPY schemas ./schemas
+COPY storage ./storage
+COPY renderers ./renderers
+
+CMD ["celery", "-A", "worker.celery_app", "worker", \
+     "--loglevel=INFO", \
+     "--concurrency=2", \
+     "--prefetch-multiplier=1", \
+     "-Q", "default"]
