@@ -60,4 +60,5 @@ target-version = "py310"
 testpaths = ["tests"]
 markers = [
     "slow: integration tests that hit live Cloud.ru FM API",
+    "cloudru_probe: WS-E prompt probes — N×3 calls against live Cloud.ru FM (run with --cloudru)",
 ]

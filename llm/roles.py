@@ -63,13 +63,15 @@ _KIMI_THINKING_OFF = {"thinking": {"type": "disabled"}}
 ROLES: dict[Role, RoleSpec] = {
     # ── v0.9 batch agents ──────────────────────────────────────────────
     Role.BRIEF_PARSER:
-        # Kimi vision — reasoning always runs; allocate budget.
-        # Output is full Brief JSON for up-to-20-slide deck.
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=3500, requires_vision=True),
+        # Kimi vision — reasoning ~7-9k chars (counted under completion_tokens
+        # per cloudru_fm_api.md). Need room for both reasoning + Brief JSON
+        # of up-to-20-slide deck. 3500 caused content truncation on 8+ slides.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=8000, requires_vision=True),
     Role.CLASSIFIER:
         # Per-deck DeckClassification with optional native blocks
-        # (kpi/table/flow can be large) → keep generous budget.
-        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=2500),
+        # (kpi/table/flow can be large). Empirically a 15-slide deck with
+        # several natives hits ~3500 output tokens — 2500 truncated big.
+        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=4000),
     Role.DISTRIBUTOR:
         # Per-deck ContentAssignment, GLM OFF for nested-JSON stability.
         RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500, extra_body=_GLM_THINKING_OFF),
@@ -79,13 +81,17 @@ ROLES: dict[Role, RoleSpec] = {
     Role.ICON_PICKER:
         RoleSpec(model="zai-org/GLM-5.1", max_tokens=1500, extra_body=_GLM_THINKING_OFF),
     Role.INFOGRAPHIC_MAKER:
-        # Shape lists with EMU coordinates can grow → 2500.
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500, extra_body=_GLM_THINKING_OFF),
+        # Shape lists with EMU coordinates can grow; 4000 truncated big-deck
+        # output mid-shape. Prompt also nudges compact JSON (no whitespace).
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=6000, extra_body=_GLM_THINKING_OFF),
     Role.COPY_EDITOR:
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2000, extra_body=_GLM_THINKING_OFF),
+        # 15-slide deck × per-slot diff strings → 2000 truncated big deck.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=4000, extra_body=_GLM_THINKING_OFF),
     Role.VISUAL_VERIFIER:
-        # Kimi vision always reasons; full 5-dim deck verdict + ghost-deck.
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=3500, requires_vision=True),
+        # Kimi vision always reasons (~5-9k chars), tokens counted under
+        # completion_tokens. 5-dim rubric × 15 slides + ghost-deck narrative
+        # = ~16k char output for big decks. 8000 truncated big near the end.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=12000, requires_vision=True),
 
     # ── Reserved (autofix / future loops) ──────────────────────────────
     Role.BRAND_GUARDIAN_CRITIC:

@@ -222,7 +222,9 @@ class LayoutChoice(BaseModel):
     """
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     num: int
-    donor: int = Field(ge=1, le=101, alias="layout_idx")
+    # 0 = native render (chart/table/flow/image) — no donor applicable per
+    # Agent 04 prompt; orchestrator routes those slides through native builders.
+    donor: int = Field(ge=0, le=101, alias="layout_idx")
     layout_name: str = ""
     rationale: str = ""
     slot_styles_override: dict[str, Any] = Field(default_factory=dict)

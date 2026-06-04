@@ -13,6 +13,11 @@ __pycache__/
 probes/_slide_fixture.png
 probes/__pycache__/
 
+# WS-E probe run outputs (raw responses + report + run logs)
+tests/probes/_artifacts/
+tests/probes/_report.md
+tests/probes/_*.log
+
 # Build
 *.egg-info/
 dist/
