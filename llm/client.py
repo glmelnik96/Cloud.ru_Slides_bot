@@ -4,11 +4,14 @@ Provides:
  - one shared OpenAI client (lazy-initialised, env-driven)
  - a token-bucket RPS limiter backed by Redis (cluster-wide cap on the API key)
  - `call_role(...)` — dispatch by Role with retry + structured logging
+ - `build_vision_content(...)` — helper for Kimi-K2.6 multimodal messages
 """
 from __future__ import annotations
 
+import base64
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 import structlog
@@ -36,6 +39,54 @@ def get_client() -> OpenAI:
     return _client
 
 
+# ─── Vision helpers ──────────────────────────────────────────────────────────
+
+VisionImage = str | bytes | Path
+"""One of: data-URL / http(s) URL string, raw PNG/JPEG bytes, Path to a file."""
+
+
+def _encode_image(image: VisionImage) -> str:
+    """Return a `data:` URL or pass-through HTTP URL for an `image_url` block."""
+    if isinstance(image, str):
+        # Already a URL (data: or http(s):) — pass through.
+        return image
+    if isinstance(image, Path):
+        data = image.read_bytes()
+        # Sniff extension for the MIME hint; default to png.
+        ext = image.suffix.lower().lstrip(".")
+        mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    if isinstance(image, (bytes, bytearray)):
+        b64 = base64.b64encode(bytes(image)).decode("ascii")
+        # No way to sniff without magic — assume PNG (the worker renders PNG).
+        return f"data:image/png;base64,{b64}"
+    raise TypeError(f"Unsupported image type: {type(image).__name__}")
+
+
+def build_vision_content(
+    text: str,
+    images: Iterable[VisionImage] = (),
+) -> list[dict[str, Any]]:
+    """Compose an OpenAI vision `content` list: text block + N image_url blocks.
+
+    Use as the ``content`` field of a user message when calling a vision role
+    (BRIEF_PARSER, VISUAL_VERIFIER, PIXEL_JUDGE)::
+
+        msg = {"role": "user", "content": build_vision_content(prompt, [png_bytes])}
+
+    Empty ``images`` is valid — yields a plain text content list that vision
+    models still accept. Brief Reader uses this to keep one code-path
+    regardless of whether the input draft has rendered slides or not.
+    """
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for img in images:
+        blocks.append({"type": "image_url", "image_url": {"url": _encode_image(img)}})
+    return blocks
+
+
+# ─── Call dispatch ───────────────────────────────────────────────────────────
+
 @dataclass(frozen=True)
 class LLMCall:
     role: Role
@@ -43,6 +94,9 @@ class LLMCall:
     # Override fields if the caller needs a one-off tweak.
     max_tokens_override: int | None = None
     extra_body_override: dict[str, Any] | None = None
+    # Optional images appended to the LAST user message via build_vision_content.
+    # Convenience for nodes that don't want to assemble content blocks manually.
+    images: list[VisionImage] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -62,6 +116,34 @@ def _merge_extra_body(spec: RoleSpec, override: dict[str, Any] | None) -> dict[s
     merged = dict(spec.extra_body)
     merged.update(override)
     return merged
+
+
+def _apply_images(messages: list[dict[str, Any]], images: list[VisionImage]) -> list[dict[str, Any]]:
+    """Inject ``images`` into the last user message as a vision content list.
+
+    Idempotent: if the last user content is already a list (caller built it
+    via build_vision_content), images are appended instead of rewrapping.
+    """
+    if not images:
+        return messages
+    out = [dict(m) for m in messages]
+    # Find last user message.
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            content = out[i].get("content")
+            if isinstance(content, list):
+                # Already vision-style: just append image blocks.
+                out[i]["content"] = content + [
+                    {"type": "image_url", "image_url": {"url": _encode_image(im)}}
+                    for im in images
+                ]
+            else:
+                # Wrap text + images.
+                out[i]["content"] = build_vision_content(str(content or ""), images)
+            return out
+    # No user message — append one.
+    out.append({"role": "user", "content": build_vision_content("", images)})
+    return out
 
 
 @retry(
@@ -84,26 +166,48 @@ def _do_call(*, model: str, messages: Iterable[dict[str, Any]], max_tokens: int,
     return resp, time.perf_counter() - t0
 
 
+def _has_vision_blocks(messages: list[dict[str, Any]]) -> bool:
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(b.get("type") == "image_url" for b in c):
+            return True
+    return False
+
+
 def call_role(call: LLMCall) -> LLMResult:
     """Dispatch a chat completion under the given Role.
 
     Retries on transient Cloud.ru errors (with exponential backoff).
     Caller is responsible for parsing `content` and re-trying with
     feedback if the JSON is malformed (see `llm.output_parsers`).
+
+    If the Role requires vision, validates that the final message list
+    contains at least one image_url block (after `images` injection).
+    Vision-required roles called without images raise ValueError early —
+    silent text-only fallback would hide the bug.
     """
     spec = ROLES[call.role]
     max_tok = call.max_tokens_override or spec.max_tokens
     extra_body = _merge_extra_body(spec, call.extra_body_override)
+    messages = _apply_images(call.messages, call.images)
+
+    if spec.requires_vision and not _has_vision_blocks(messages):
+        raise ValueError(
+            f"Role {call.role.value} requires vision input but no image_url "
+            "blocks were provided (neither in messages nor via call.images)."
+        )
+
     logger.debug(
         "llm.call.start",
         role=call.role.value,
         model=spec.model,
         max_tokens=max_tok,
-        msg_count=len(call.messages),
+        msg_count=len(messages),
+        vision=_has_vision_blocks(messages),
     )
     resp, elapsed = _do_call(
         model=spec.model,
-        messages=call.messages,
+        messages=messages,
         max_tokens=max_tok,
         temperature=spec.temperature,
         extra_body=extra_body,

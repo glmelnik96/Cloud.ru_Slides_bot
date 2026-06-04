@@ -1,14 +1,33 @@
-"""LangGraph wiring. Sync graph + RedisSaver checkpoint store.
+"""LangGraph wiring — v0.9 batch pipeline (M3).
 
 Sync everywhere — see PLAN.md §1 (Approach A): the graph runs inside a
 Celery prefork worker. Async only lives in the bot process.
 
-The graph is intentionally tiny in M2:
+Flow:
 
-    START → parse → process → finalize → END
+    START
+      → parse
+      → brief        (Kimi vision)
+      → classify     (DeepSeek)
+      → design       (DeepSeek)   # donor pick BEFORE distribute — distributor
+                                  # needs slot capacities of the chosen donor
+      → distribute   (GLM OFF)
+      → icons        (GLM OFF)
+      → infographic  (GLM OFF)
+      → copyedit     (GLM OFF)
+      → assemble_plan
+      → build        (skeleton — wraps build_v9.py in next chunk)
+      → brand_guard  (skeleton — wraps brand_guardian.py)
+      → render_png   (skeleton — LibreOffice headless)
+      → visual_verify (Kimi vision)
+      → process_verify (skeleton — synthesises validator verdicts)
+      → finalize
+      → END
 
-Real nodes replace these stubs in M3+. The wiring (state schema, checkpointer,
-edges) is what we want to lock in early.
+Skeleton nodes write a clear FIXME marker into their artefact key so a
+trace of any session immediately shows where the pipeline is still
+unfinished. LLM nodes run end-to-end and produce real Pydantic-validated
+output.
 """
 from __future__ import annotations
 
@@ -17,20 +36,81 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from graph.nodes._stubs import finalize_stub, parse_stub, process_stub
+from graph.nodes.agents import (
+    brief_node,
+    classify_node,
+    copyedit_node,
+    design_node,
+    distribute_node,
+    icons_node,
+    infographic_node,
+    visual_verify_node,
+)
+from graph.nodes.pipeline import (
+    assemble_plan_node,
+    brand_guard_node,
+    build_node,
+    finalize_node,
+    parse_node,
+    process_verify_node,
+    render_png_node,
+)
 from schemas.session import SessionState
 from storage.redis_client import DB, url_for
 
 
+# Node-name constants kept here so wiring + tests share one source.
+N_PARSE = "parse"
+N_BRIEF = "brief"
+N_CLASSIFY = "classify"
+N_DESIGN = "design"
+N_DISTRIBUTE = "distribute"
+N_ICONS = "icons"
+N_INFOGRAPHIC = "infographic"
+N_COPYEDIT = "copyedit"
+N_ASSEMBLE = "assemble_plan"
+N_BUILD = "build"
+N_BRAND = "brand_guard"
+N_RENDER_PNG = "render_png"
+N_VISUAL = "visual_verify"
+N_PROCESS_VERIFY = "process_verify"
+N_FINALIZE = "finalize"
+
+
 def _build_graph() -> StateGraph:
     g = StateGraph(SessionState)
-    g.add_node("parse", parse_stub)
-    g.add_node("process", process_stub)
-    g.add_node("finalize", finalize_stub)
-    g.add_edge(START, "parse")
-    g.add_edge("parse", "process")
-    g.add_edge("process", "finalize")
-    g.add_edge("finalize", END)
+    g.add_node(N_PARSE, parse_node)
+    g.add_node(N_BRIEF, brief_node)
+    g.add_node(N_CLASSIFY, classify_node)
+    g.add_node(N_DESIGN, design_node)
+    g.add_node(N_DISTRIBUTE, distribute_node)
+    g.add_node(N_ICONS, icons_node)
+    g.add_node(N_INFOGRAPHIC, infographic_node)
+    g.add_node(N_COPYEDIT, copyedit_node)
+    g.add_node(N_ASSEMBLE, assemble_plan_node)
+    g.add_node(N_BUILD, build_node)
+    g.add_node(N_BRAND, brand_guard_node)
+    g.add_node(N_RENDER_PNG, render_png_node)
+    g.add_node(N_VISUAL, visual_verify_node)
+    g.add_node(N_PROCESS_VERIFY, process_verify_node)
+    g.add_node(N_FINALIZE, finalize_node)
+
+    g.add_edge(START, N_PARSE)
+    g.add_edge(N_PARSE, N_BRIEF)
+    g.add_edge(N_BRIEF, N_CLASSIFY)
+    g.add_edge(N_CLASSIFY, N_DESIGN)
+    g.add_edge(N_DESIGN, N_DISTRIBUTE)
+    g.add_edge(N_DISTRIBUTE, N_ICONS)
+    g.add_edge(N_ICONS, N_INFOGRAPHIC)
+    g.add_edge(N_INFOGRAPHIC, N_COPYEDIT)
+    g.add_edge(N_COPYEDIT, N_ASSEMBLE)
+    g.add_edge(N_ASSEMBLE, N_BUILD)
+    g.add_edge(N_BUILD, N_BRAND)
+    g.add_edge(N_BRAND, N_RENDER_PNG)
+    g.add_edge(N_RENDER_PNG, N_VISUAL)
+    g.add_edge(N_VISUAL, N_PROCESS_VERIFY)
+    g.add_edge(N_PROCESS_VERIFY, N_FINALIZE)
+    g.add_edge(N_FINALIZE, END)
     return g
 
 

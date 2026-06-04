@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -83,6 +83,16 @@ class SessionState(BaseModel):
     errors: list[str] = Field(default_factory=list)
     # Notes are short user-visible lines included in the final summary.
     notes: list[str] = Field(default_factory=list)
+
+    # Pipeline artefacts. Each node stores its parsed output (model_dump'ed
+    # from the corresponding Pydantic schema) under a stable key:
+    #   parsed_deck, brief, classification, layouts, content,
+    #   icons, infographics, copy_edited, plan, brand_report,
+    #   visual_verdict, verifier_verdict.
+    # Keeping this as a flat dict avoids declaring 12 typed fields on
+    # SessionState while keeping JSON-roundtrippability for RedisSaver.
+    # Type-safe accessors live in `graph/state_io.py` (added in next chunk).
+    artefacts: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_input(cls, inp: SessionInput) -> "SessionState":

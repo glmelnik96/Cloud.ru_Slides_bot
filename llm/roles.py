@@ -4,6 +4,18 @@ Single source of truth for the pipeline. Each LangGraph node imports its
 RoleSpec from here and never hard-codes a model name.
 
 Empirical findings — see <project>/memory/cloudru_fm_api.md.
+
+Mapping rationale (M3, v0.9 batch):
+- Only Kimi-K2.6 is multimodal on Cloud.ru FM → Brief (01) and Visual
+  Verifier (10) MUST use it. Vision-grounding also fixes Kimi's
+  text-only brief instability ("often invalid" at 3.7s).
+- DeepSeek-V4-Pro is non-reasoning, ~0.7–3.8s on JSON → 02 Classifier
+  and 04 Designer (terse lookup-table reasoning).
+- GLM-5.1 thinking-OFF is the stable nested-JSON workhorse → 03
+  Distributor, 05 Icons, 06 Infographic, 07 Copy Editor.
+- GLM-5.1 thinking-ON gives harshest critic recall (score=10 vs
+  DeepSeek 30) → kept for BRAND_GUARDIAN_CRITIC and AUTOFIX (used
+  outside the v0.9 batch loop, in future autofix iterations).
 """
 from __future__ import annotations
 
@@ -13,15 +25,20 @@ from typing import Any
 
 
 class Role(str, Enum):
-    BRIEF_PARSER = "brief_parser"
-    CLASSIFIER = "classifier"
-    OUTLINE_BUILDER = "outline_builder"
-    COPY_EDITOR = "copy_editor"
-    DESIGNER = "designer"
-    DISTRIBUTOR = "distributor"
+    # v0.9 batch agents (M3)
+    BRIEF_PARSER = "brief_parser"            # 01 — Kimi vision
+    CLASSIFIER = "classifier"                # 02 — DeepSeek
+    DISTRIBUTOR = "distributor"              # 03 — GLM OFF
+    DESIGNER = "designer"                    # 04 — DeepSeek
+    ICON_PICKER = "icon_picker"              # 05 — GLM OFF
+    INFOGRAPHIC_MAKER = "infographic_maker"  # 06 — GLM OFF
+    COPY_EDITOR = "copy_editor"              # 07 — GLM OFF
+    VISUAL_VERIFIER = "visual_verifier"      # 10 — Kimi vision
+
+    # Reserved for future autofix / critic loops (not used in M3 batch flow)
     BRAND_GUARDIAN_CRITIC = "brand_guardian_critic"
     AUTOFIX = "autofix"
-    VISUAL_VERIFIER = "visual_verifier"
+    OUTLINE_BUILDER = "outline_builder"
     PIXEL_JUDGE = "pixel_judge"
 
 
@@ -44,27 +61,41 @@ _KIMI_THINKING_OFF = {"thinking": {"type": "disabled"}}
 
 
 ROLES: dict[Role, RoleSpec] = {
+    # ── v0.9 batch agents ──────────────────────────────────────────────
     Role.BRIEF_PARSER:
-        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=400),
+        # Kimi vision — reasoning always runs; allocate budget.
+        # Output is full Brief JSON for up-to-20-slide deck.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=3500, requires_vision=True),
     Role.CLASSIFIER:
-        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=200),
-    Role.OUTLINE_BUILDER:
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=1200, extra_body=_GLM_THINKING_OFF),
-    Role.COPY_EDITOR:
-        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=400),
-    Role.DESIGNER:
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=800, extra_body=_GLM_THINKING_OFF),
+        # Per-deck DeckClassification with optional native blocks
+        # (kpi/table/flow can be large) → keep generous budget.
+        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=2500),
     Role.DISTRIBUTOR:
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=1200, extra_body=_GLM_THINKING_OFF),
+        # Per-deck ContentAssignment, GLM OFF for nested-JSON stability.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500, extra_body=_GLM_THINKING_OFF),
+    Role.DESIGNER:
+        # LayoutPlan over the deck; DeepSeek terse table-lookup style.
+        RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=2000),
+    Role.ICON_PICKER:
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=1500, extra_body=_GLM_THINKING_OFF),
+    Role.INFOGRAPHIC_MAKER:
+        # Shape lists with EMU coordinates can grow → 2500.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500, extra_body=_GLM_THINKING_OFF),
+    Role.COPY_EDITOR:
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2000, extra_body=_GLM_THINKING_OFF),
+    Role.VISUAL_VERIFIER:
+        # Kimi vision always reasons; full 5-dim deck verdict + ghost-deck.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=3500, requires_vision=True),
+
+    # ── Reserved (autofix / future loops) ──────────────────────────────
     Role.BRAND_GUARDIAN_CRITIC:
         # Thinking ON intentionally — empirically yielded the harshest, most
         # accurate verdict on synthetic brand violations (score=10 vs 30).
         RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500),
     Role.AUTOFIX:
         RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500),
-    Role.VISUAL_VERIFIER:
-        # Kimi vision always reasons; allocate enough budget regardless of toggle.
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=3000, requires_vision=True),
+    Role.OUTLINE_BUILDER:
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=1200, extra_body=_GLM_THINKING_OFF),
     Role.PIXEL_JUDGE:
         RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=2000, requires_vision=True),
 }
