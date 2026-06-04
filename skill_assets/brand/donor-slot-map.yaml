@@ -326,7 +326,10 @@ donors:
     category: table_gray_simple
     description: "Серый слайд под таблицу + заголовок + краткий caption. ВНИМАНИЕ: содержит PNG-таблицу-заглушку."
     donor_type: fixed_png_content
-    remove_if_user_provides_table: [0]   # SHTABLE "Таблица 11" — удалять если build получает свою таблицу
+    # PNG-заглушка "Таблица 11" всегда удаляется — она лишь визуальный мокап.
+    # Если plan_slide.table_data задан, build_v9 добавит реальную таблицу;
+    # иначе слайд остаётся title+caption (приемлемая деградация, без заглушки).
+    remove_before_fill: [0]
     slots:
       title: { shape_idx: 1, size_pt: 20, bold: true, max_chars: 50, safe_max_chars: 40, canonical_color: "#222222" }
       caption: { shape_idx: 2, size_pt: 16, max_chars: 200, safe_max_chars: 140, canonical_color: "#222222" }

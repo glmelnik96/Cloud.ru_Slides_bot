@@ -483,6 +483,68 @@ pipeline run. We cap at 1 to keep per-deck Cloud.ru spend predictable; raise
 only after measuring real lift from a second pass."""
 
 
+# Categories of issues for autofix routing — see T1.1 diagnosis 2026-06-04
+# (memory/live_run_findings.md). Live run had 8/11 blockers in text_replaced
+# + semantics (caused by ph_type bug, fixed in T0.2) — the autofix loop wasted
+# a retry on COPY_EDITOR which couldn't address them. These tags let
+# autofix_can_help() skip when COPY_EDITOR would be ineffective.
+_ISSUE_CATEGORIES = (
+    "text_overflow",   # chars > max — COPY_EDITOR can rephrase/shorten
+    "text_replaced",   # placeholder leaked into render — needs build/donor fix
+    "semantics",       # content doesn't match slide topic — COPY_EDITOR may help
+    "aesthetic",       # missing brand accents / scannability — needs visual agent
+    "other",
+)
+# Substrings (lowercased) that map an issue line to a category.
+_TAG_BY_SUBSTRING: tuple[tuple[str, str], ...] = (
+    ("text_replaced", "text_replaced"),
+    ("placeholder", "text_replaced"),
+    ("overflow", "text_overflow"),
+    ("chars > max", "text_overflow"),
+    ("strategy 3", "text_overflow"),
+    ("semantics_ok", "semantics"),
+    ("не соответствует", "semantics"),
+    ("hierarchy", "aesthetic"),
+    ("philosophy", "aesthetic"),
+    ("function", "aesthetic"),
+    ("detail", "aesthetic"),
+    ("бренд", "aesthetic"),
+    ("сканируется", "aesthetic"),
+)
+
+
+def _categorize_issue(line: str) -> str:
+    s = line.lower()
+    for needle, tag in _TAG_BY_SUBSTRING:
+        if needle in s:
+            return tag
+    return "other"
+
+
+def issue_breakdown(arts: dict[str, Any]) -> dict[str, int]:
+    """Count blockers + warnings by category. Used by route guards + logs."""
+    counts: dict[str, int] = {c: 0 for c in _ISSUE_CATEGORIES}
+    ver = arts.get("verifier_verdict") or {}
+    for item in (ver.get("blockers") or []) + (ver.get("warnings") or []):
+        text = item if isinstance(item, str) else \
+               (item.get("msg") or item.get("text") or str(item))
+        counts[_categorize_issue(str(text))] += 1
+    return counts
+
+
+def autofix_can_help(arts: dict[str, Any]) -> bool:
+    """True iff the verdict has at least one issue COPY_EDITOR can address.
+
+    COPY_EDITOR fixes ``text_overflow`` (shorten) and ``semantics``
+    (rephrase to match topic). ``text_replaced`` (placeholder leak — build
+    bug) and ``aesthetic`` (needs INFOGRAPHIC_MAKER) are out of scope, so
+    triggering a retry for them just burns Cloud.ru budget without
+    improving the verdict (2026-06-04 live run regressed 11→13 warnings).
+    """
+    b = issue_breakdown(arts)
+    return (b["text_overflow"] + b["semantics"]) > 0
+
+
 def _collect_verifier_feedback(arts: dict[str, Any]) -> list[str]:
     """Extract per-slide actionable issues for the autofix prompt.
 
@@ -570,6 +632,7 @@ def autofix_node(state: SessionState) -> dict[str, Any]:
         feedback_items=len(feedback),
         emoji_stripped=emoji_stripped,
         slides=len(edited.slides),
+        breakdown=issue_breakdown(arts),
     )
     return {
         "artefacts": arts,

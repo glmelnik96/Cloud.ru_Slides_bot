@@ -34,10 +34,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+import structlog
 from langgraph.graph import END, START, StateGraph
 
 from graph.nodes.agents import (
     AUTOFIX_BUDGET,
+    autofix_can_help,
     autofix_node,
     brief_node,
     classify_node,
@@ -46,6 +48,7 @@ from graph.nodes.agents import (
     distribute_node,
     icons_node,
     infographic_node,
+    issue_breakdown,
     visual_verify_node,
 )
 from graph.nodes.pipeline import (
@@ -80,26 +83,42 @@ N_AUTOFIX = "autofix"
 N_FINALIZE = "finalize"
 
 
+_route_logger = structlog.get_logger(__name__)
+
+
 def _route_after_verify(state: SessionState) -> str:
     """Conditional edge router after process_verify.
 
     READY → finalize (ship).
-    NEEDS_REWORK with budget remaining → autofix (loop).
-    NEEDS_REWORK with no budget → finalize (ship as draft with NEEDS_REWORK noted).
+    NEEDS_REWORK with budget remaining AND fixable blockers → autofix (loop).
+    NEEDS_REWORK but COPY_EDITOR can't help (e.g. all blockers are
+    placeholder-leak or pure aesthetic) → finalize (skip wasted retry).
+    NEEDS_REWORK with no budget → finalize.
 
     We read the verdict from ``state.artefacts['verifier_verdict']`` rather
     than re-deriving it, so the route stays in lockstep with what the
     finalize/UI notes show. ``autofix_iterations`` is incremented inside
     ``autofix_node`` itself, so checking ``< AUTOFIX_BUDGET`` here gives
     exactly one retry pass before we ship as draft.
+
+    The fixability gate (autofix_can_help) prevents the 2026-06-04 regression
+    where an autofix pass over non-text-fixable blockers actually increased
+    warnings 11→13 — see live_run_findings.md / T1.2.
     """
     arts = state.artefacts or {}
     verdict = (arts.get("verifier_verdict") or {}).get("verdict", "NEEDS_REWORK")
     if verdict == "READY":
         return N_FINALIZE
-    if (state.autofix_iterations or 0) < AUTOFIX_BUDGET:
-        return N_AUTOFIX
-    return N_FINALIZE
+    if (state.autofix_iterations or 0) >= AUTOFIX_BUDGET:
+        return N_FINALIZE
+    if not autofix_can_help(arts):
+        _route_logger.info(
+            "route.autofix.skip_unfixable",
+            session_id=state.session_id,
+            breakdown=issue_breakdown(arts),
+        )
+        return N_FINALIZE
+    return N_AUTOFIX
 
 
 def _build_graph() -> StateGraph:

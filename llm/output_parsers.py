@@ -20,9 +20,10 @@ from llm.roles import ROLES, Role
 
 # Hard ceiling on auto-bumped max_tokens. Beyond this we accept the
 # failure rather than burn more cost on a likely-broken role/prompt.
-# 24000 = 3× the largest static budget (VISUAL_VERIFIER=12000) — enough
-# headroom for the worst reasoning-trace explosion we've seen on Kimi
-# vision, but bounded so a misconfigured prompt can't spend unbounded.
+# 24000 = empirical worst case observed 2026-06-04 (Kimi vision visual
+# verifier on 14-slide deck: completion_tokens=22502). Static defaults
+# in roles.py are tuned to make truncation rare; this ceiling is the
+# rare-case safety net, not the steady state.
 _TRUNCATION_TOKENS_CEILING = 24000
 
 

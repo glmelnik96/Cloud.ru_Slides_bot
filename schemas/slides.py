@@ -245,6 +245,61 @@ PlaceholderType = Literal[
 ]
 
 
+# Semantic slot names emitted by donor_map.slot_specs_for_layouts (keys of
+# the donor YAML) → canonical OOXML PlaceholderType. The LLM mirrors back
+# whatever ph_type it sees in the prompt's SLOT_SPECS, so without a
+# normalizer Pydantic literal_error rejects the whole batch (39× failures
+# observed on 14-slide live run 2026-06-04). Mapping table is exhaustive
+# wrt donor-slot-map.yaml keys; anything unmapped falls through to OTHER.
+_SLOT_NAME_TO_OOXML: dict[str, str] = {
+    "title": "TITLE",
+    "center_title": "CENTER_TITLE",
+    "subtitle": "SUBTITLE",
+    "body": "BODY",
+    "content": "CONTENT",
+    "picture": "PICTURE",
+    "image": "PICTURE",
+    "logo": "PICTURE",
+    "object": "OBJECT",
+    "other": "OTHER",
+}
+
+
+def _normalize_ph_type(v: Any) -> Any:
+    """Coerce ph_type into the PlaceholderType literal.
+
+    Distributor LLM occasionally mirrors lowercase / semantic slot names
+    from SLOT_SPECS instead of the uppercase OOXML enum the schema
+    expects. Uppercase first (handles "title" → "TITLE"); then map known
+    multi-column body variants ("COL1_BODY", "COL2_BODY"...) and any
+    *_BODY / *_CONTENT prefix to canonical BODY / CONTENT; everything
+    else unknown → OTHER. Non-string inputs pass through untouched so
+    Pydantic produces its normal type error.
+    """
+    if not isinstance(v, str):
+        return v
+    s = v.strip()
+    if not s:
+        return "BODY"
+    upper = s.upper()
+    if upper in {"TITLE", "CENTER_TITLE", "SUBTITLE", "BODY", "CONTENT",
+                 "PICTURE", "OBJECT", "OTHER"}:
+        return upper
+    # Multi-column body / content variants (col1_body, body_left, etc.)
+    if "BODY" in upper:
+        return "BODY"
+    if "CONTENT" in upper:
+        return "CONTENT"
+    if "TITLE" in upper:
+        return "TITLE"
+    if "PICTURE" in upper or "IMAGE" in upper or "LOGO" in upper:
+        return "PICTURE"
+    # Lowercase semantic name lookup
+    if s.lower() in _SLOT_NAME_TO_OOXML:
+        return _SLOT_NAME_TO_OOXML[s.lower()]
+    return "OTHER"
+
+
 class PlaceholderAssignment(BaseModel):
     model_config = ConfigDict(extra="allow")
     ph_idx: int
@@ -252,6 +307,11 @@ class PlaceholderAssignment(BaseModel):
     content: str = ""
     # Set by Copy Editor — diff summary of the edits applied.
     diff: str | None = None
+
+    @field_validator("ph_type", mode="before")
+    @classmethod
+    def _coerce_ph_type(cls, v: Any) -> Any:
+        return _normalize_ph_type(v)
 
 
 class ContentAssignment(BaseModel):

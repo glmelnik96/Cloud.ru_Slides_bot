@@ -64,12 +64,11 @@ ROLES: dict[Role, RoleSpec] = {
     # ── v0.9 batch agents ──────────────────────────────────────────────
     Role.BRIEF_PARSER:
         # Kimi vision — reasoning ~7-9k chars (counted under completion_tokens
-        # per cloudru_fm_api.md). Need room for both reasoning + Brief JSON
-        # of up-to-20-slide deck. 3500 caused content truncation on 8+ slides.
-        # 2026-06-04 live: 14-slide deck → reasoning ate entire 8000-token
-        # budget, model never emitted content (empty content, both retries).
-        # 12000 mirrors VISUAL_VERIFIER which handles 15-slide decks safely.
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=12000, requires_vision=True),
+        # per cloudru_fm_api.md). 14-slide deck observation 2026-06-04:
+        # successful retry used completion_tokens=16785 (reasoning 35k chars
+        # + content 12k chars). 18000 covers that envelope with margin and
+        # avoids the +75s auto-bump round-trip on every run.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=18000, requires_vision=True),
     Role.CLASSIFIER:
         # Per-deck DeckClassification with optional native blocks
         # (kpi/table/flow can be large). Empirically a 15-slide deck with
@@ -86,19 +85,29 @@ ROLES: dict[Role, RoleSpec] = {
         # LayoutPlan over the deck; DeepSeek terse table-lookup style.
         RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=2000),
     Role.ICON_PICKER:
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=1500, extra_body=_GLM_THINKING_OFF),
+        # 2026-06-04 live: 14-slide deck hit length-cap at 1500; auto-bump
+        # to 3000 succeeded with completion_tokens=2556. 3000 is the steady
+        # state and avoids the +13s round-trip.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=3000, extra_body=_GLM_THINKING_OFF),
     Role.INFOGRAPHIC_MAKER:
         # Shape lists with EMU coordinates can grow; 4000 truncated big-deck
-        # output mid-shape. Prompt also nudges compact JSON (no whitespace).
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=6000, extra_body=_GLM_THINKING_OFF),
+        # output mid-shape. 2026-06-04 live: 14-slide deck hit length-cap
+        # at 6000; auto-bump to 12000 succeeded at completion_tokens=2813
+        # (with compact JSON prompt nudge). 12000 covers worst case.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=12000, extra_body=_GLM_THINKING_OFF),
     Role.COPY_EDITOR:
         # 15-slide deck × per-slot diff strings → 2000 truncated big deck.
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=4000, extra_body=_GLM_THINKING_OFF),
+        # 2026-06-04 live: 14-slide deck hit length-cap at 4000; auto-bump
+        # to 8000 succeeded with completion_tokens=5453.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=8000, extra_body=_GLM_THINKING_OFF),
     Role.VISUAL_VERIFIER:
         # Kimi vision always reasons (~5-9k chars), tokens counted under
         # completion_tokens. 5-dim rubric × 15 slides + ghost-deck narrative
-        # = ~16k char output for big decks. 8000 truncated big near the end.
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=12000, requires_vision=True),
+        # = ~16k char output for big decks. 2026-06-04 live: 14-slide deck
+        # twice hit length-cap at 12000, auto-bump to 24000 succeeded at
+        # completion_tokens=16443 and 22502. 20000 is the empirical ceiling
+        # and saves ~150s × 2 (≈5 min per pipeline) vs always-bumping.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=20000, requires_vision=True),
 
     # ── Reserved (autofix / future loops) ──────────────────────────────
     Role.BRAND_GUARDIAN_CRITIC:

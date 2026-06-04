@@ -23,6 +23,44 @@ def _map_path() -> Path:
     return Path(skill_bridge.DONOR_SLOT_MAP)
 
 
+# YAML semantic slot names → canonical OOXML PlaceholderType enum.
+# Kept here (not imported from schemas/) to avoid a circular import: schemas
+# is at the bottom of the dependency graph and graph.donor_map is one of
+# its consumers. The two tables MUST stay in sync — see PlaceholderType in
+# schemas/slides.py. _normalize_ph_type there is a defensive fallback for
+# anything that slips past this translation.
+_OOXML_BY_SLOT_NAME: dict[str, str] = {
+    "title": "TITLE",
+    "center_title": "CENTER_TITLE",
+    "subtitle": "SUBTITLE",
+    "body": "BODY",
+    "content": "CONTENT",
+    "picture": "PICTURE",
+    "image": "PICTURE",
+    "logo": "PICTURE",
+}
+
+
+def _slot_name_to_ooxml(slot_name: str) -> str:
+    """Translate a YAML semantic slot key (e.g. ``col1_body``) into the
+    canonical OOXML PlaceholderType enum (e.g. ``BODY``). Falls back to
+    substring detection for multi-column variants (``col1_body``,
+    ``body_left`` → BODY); anything unrecognised becomes ``OTHER``.
+    """
+    s = (slot_name or "").lower().strip()
+    if s in _OOXML_BY_SLOT_NAME:
+        return _OOXML_BY_SLOT_NAME[s]
+    if "title" in s:
+        return "TITLE"
+    if "body" in s:
+        return "BODY"
+    if "content" in s:
+        return "CONTENT"
+    if "picture" in s or "image" in s or "logo" in s:
+        return "PICTURE"
+    return "OTHER"
+
+
 @lru_cache(maxsize=1)
 def _load_raw() -> dict[str, Any]:
     """Parse donor-slot-map.yaml and return the whole document.
@@ -207,9 +245,15 @@ def slot_specs_for_layouts(layout_idxs: list[int]) -> dict[str, list[dict[str, A
         for slot_name, slot in slots.items():
             if not isinstance(slot, dict):
                 continue
+            # Translate the YAML's semantic slot name (title/col1_body/etc.)
+            # into the OOXML PlaceholderType enum the schema expects. Without
+            # this, the LLM mirrors lowercase back and Pydantic rejects every
+            # placeholder_assignment (39× failure 2026-06-04 live).
+            # schemas.slides._normalize_ph_type also catches edge cases.
             spec = {
                 "ph_idx": slot.get("shape_idx"),
-                "ph_type": slot_name,
+                "ph_type": _slot_name_to_ooxml(slot_name),
+                "slot_name": slot_name,  # keep original for debug / future use
                 "safe_max_chars": slot.get("safe_max_chars") or slot.get("max_chars"),
             }
             # Drop slots without a shape_idx — meaningless to the distributor.
