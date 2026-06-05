@@ -18,6 +18,7 @@ from pptx import Presentation  # noqa: E402
 from pptx.enum.shapes import MSO_SHAPE_TYPE  # noqa: E402
 
 from infographic_renderer import (  # noqa: E402  (path injected by skill_bridge)
+    _clamp_shapes_to_safe_area,
     _parse_hex,
     clear_donor_body_slots,
     clear_donor_non_title_text,
@@ -221,3 +222,86 @@ def test_clear_donor_non_title_text_skips_already_empty(blank_slide) -> None:
     _add_textbox_with_text(blank_slide, "", font_pt=14)
     cleared = clear_donor_non_title_text(blank_slide)
     assert cleared == 0
+
+
+# ─── P1-1 (2026-06-05): SAFE_AREA clamp for Agent 06 process shapes ──────────
+
+_EMU = 9525  # 1 px
+
+
+def _block(left_px: int, width_px: int, top_px: int = 300,
+           height_px: int = 100, type_: str = "rounded_rect",
+           text: str = "") -> dict:
+    return {
+        "type": type_,
+        "left_emu": left_px * _EMU,
+        "top_emu": top_px * _EMU,
+        "width_emu": width_px * _EMU,
+        "height_emu": height_px * _EMU,
+        "fill_color": "#F2F2F2",
+        "stroke_color": "none",
+        "stroke_width_pt": 0.0,
+        "text": text,
+        "font": "SB Sans Display",
+        "font_size_pt": 12,
+        "font_color": "#222222",
+    }
+
+
+def test_clamp_noop_when_inside_safe_area() -> None:
+    """3-block process inside safe-area [30, 1250] — no mutation."""
+    shapes = [
+        _block(60, 300),
+        _block(420, 300),
+        _block(780, 300),
+    ]
+    snapshot = [(s["left_emu"], s["width_emu"]) for s in shapes]
+    mutated = _clamp_shapes_to_safe_area(shapes)
+    assert mutated == 0
+    after = [(s["left_emu"], s["width_emu"]) for s in shapes]
+    assert after == snapshot
+
+
+def test_clamp_shrinks_4block_overshoot() -> None:
+    """Live run3.slide2 emitted 4 blocks 330px wide + 30px gaps starting
+    at x=30 — total span 1410px, well past safe-right=1250px. The
+    clamp must scale everything down so the last block ends ≤ 1250px."""
+    shapes = [
+        _block(30, 330),    # 30..360
+        _block(390, 330),   # 390..720
+        _block(750, 330),   # 750..1080
+        _block(1110, 330),  # 1110..1440   ← overshoots
+        # Arrows (zero-width spans skipped) — include 1 to exercise
+        # mixed shape types.
+        _block(360, 30, top_px=350, height_px=10, type_="arrow"),
+    ]
+    mutated = _clamp_shapes_to_safe_area(shapes)
+    assert mutated >= 4, "all 4 process blocks should be mutated"
+    # All shapes must end ≤ safe.right (1250 px → 11_906_250 EMU).
+    safe_right_emu = 1250 * _EMU
+    safe_left_emu = 30 * _EMU
+    for s in shapes:
+        assert s["left_emu"] >= safe_left_emu - 100  # tiny rounding slack
+        assert (s["left_emu"] + s["width_emu"]) <= safe_right_emu + 100
+
+
+def test_clamp_preserves_relative_order_and_gaps() -> None:
+    """Scaling must keep block ordering and roughly proportional gaps."""
+    shapes = [
+        _block(30, 330),
+        _block(390, 330),
+        _block(750, 330),
+        _block(1110, 330),
+    ]
+    _clamp_shapes_to_safe_area(shapes)
+    lefts = [s["left_emu"] for s in shapes]
+    # Strictly increasing.
+    assert lefts == sorted(lefts)
+    # Pairwise gaps roughly equal (within rounding).
+    gaps = [lefts[i + 1] - lefts[i] for i in range(len(lefts) - 1)]
+    assert max(gaps) - min(gaps) <= 10_000, gaps
+
+
+def test_clamp_empty_input_returns_zero() -> None:
+    assert _clamp_shapes_to_safe_area([]) == 0
+    assert _clamp_shapes_to_safe_area([{"type": "text"}]) == 0  # no width

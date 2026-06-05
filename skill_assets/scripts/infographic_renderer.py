@@ -207,6 +207,90 @@ _HANDLERS = {
 }
 
 
+# P1-1 (2026-06-05): Agent 06's `process` infographic regularly overshoots
+# the safe-area on 4-block layouts. Live run3.slide2 produced four 330-px
+# blocks starting at x=30 — total reach 1410 px on a 1280-px canvas, so
+# the last block ("Ожидание") clipped 160 px past the right edge. The
+# prompt now states block_width formulas but the LLM still emits raw
+# numbers. We post-validate here so visual quality doesn't depend on
+# perfect prompt adherence.
+#
+# Canvas + safe-area are duplicated from llm/prompts/_shared.py — both
+# modules ship in the skill bundle and we keep imports local to avoid
+# a runtime dep on the prompts package.
+_EMU_PER_PX = 9525
+_SAFE_AREA_PX = {"left": 30, "right": 1250, "top": 140, "bottom": 660}
+_SAFE_AREA_EMU = {
+    k: v * _EMU_PER_PX for k, v in _SAFE_AREA_PX.items()
+}
+
+
+def _clamp_shapes_to_safe_area(shapes: list[dict[str, Any]]) -> int:
+    """Rescale a list of Agent 06 shape specs so they fit in the
+    horizontal safe-area. Returns count of shapes mutated.
+
+    Strategy: find the leftmost left_emu and rightmost (left + width)
+    among rectangle-class shapes (rounded_rect / rectangle / circle /
+    arrow / line / text). If the bounding span exceeds the safe-area
+    width, compute a single ``scale = safe_width / span`` factor and a
+    horizontal shift so the leftmost shape sits at safe.left. Apply the
+    same affine transform to every shape's ``left_emu`` and
+    ``width_emu`` — vertical positions are kept (the prompt warns
+    against top/bottom overflow specifically; live overshoot was
+    horizontal only). Empty input → no-op.
+
+    Mutates the spec dicts in place.
+    """
+    if not shapes:
+        return 0
+    spans = []
+    for spec in shapes:
+        if not isinstance(spec, dict):
+            continue
+        try:
+            l = int(spec.get("left_emu", 0) or 0)
+            w = int(spec.get("width_emu", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0:
+            continue
+        spans.append((l, l + w, spec))
+    if not spans:
+        return 0
+    min_left = min(s[0] for s in spans)
+    max_right = max(s[1] for s in spans)
+    safe_left = _SAFE_AREA_EMU["left"]
+    safe_right = _SAFE_AREA_EMU["right"]
+    safe_w = safe_right - safe_left
+    current_w = max_right - min_left
+    # Already inside safe-area? Bail out (don't expand small process diagrams).
+    if min_left >= safe_left and max_right <= safe_right:
+        return 0
+    if current_w <= 0 or safe_w <= 0:
+        return 0
+    scale = min(1.0, safe_w / current_w)
+    # If only the start is off (e.g. starts at x=20 < safe_left=30) but
+    # everything fits within safe_w when shifted, just shift (scale=1.0).
+    # Otherwise scale down + shift to safe.left.
+    mutated = 0
+    for left_emu, right_emu, spec in spans:
+        # Map x ∈ [min_left, max_right] → x' ∈ [safe_left, safe_left+scale*current_w]
+        new_left = int(round(safe_left + (left_emu - min_left) * scale))
+        new_width = max(1, int(round((right_emu - left_emu) * scale)))
+        if new_left != spec.get("left_emu") or new_width != spec.get("width_emu"):
+            spec["left_emu"] = new_left
+            spec["width_emu"] = new_width
+            mutated += 1
+    if mutated:
+        print(
+            f"infographic clamp: span {(max_right - min_left)//_EMU_PER_PX}px "
+            f"→ safe-area {safe_w//_EMU_PER_PX}px (scale={scale:.3f}), "
+            f"shapes mutated={mutated}",
+            file=sys.stderr,
+        )
+    return mutated
+
+
 def render_infographic_shapes(slide, shapes: list[dict[str, Any]]) -> int:
     """Inject Agent 06 shape specs onto an existing (cloned) donor slide.
 
@@ -216,6 +300,12 @@ def render_infographic_shapes(slide, shapes: list[dict[str, Any]]) -> int:
     """
     if not shapes:
         return 0
+    # P1-1: clamp the Agent 06 spec list to safe-area before rendering.
+    # Cheap, idempotent — never expands shapes that already fit.
+    try:
+        _clamp_shapes_to_safe_area(shapes)
+    except Exception as e:  # noqa: BLE001 — never fail the build
+        print(f"WARN: clamp_shapes_to_safe_area failed: {e}", file=sys.stderr)
     added = 0
     for i, spec in enumerate(shapes):
         if not isinstance(spec, dict):

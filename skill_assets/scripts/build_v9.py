@@ -280,7 +280,29 @@ def build(plan_path, template_path, output_path, donor_map_path):
         #      (формат: {slot_name: [shape_idx]} в slot.shape_idx_when_unused — упрощённо мапим)
         #   4. donor_def.remove_if_user_provides_table — удалять если plan имеет table_data
         if donor_def is not None:
-            remove_idx_list = list(donor_def.get("remove_before_fill", []))
+            # P0-2 (2026-06-05): donor 53 / 54 mark their PNG-stub in
+            # ``remove_before_fill`` so a generated table can take its
+            # place. BUT when no table_data is supplied (Agent 03 didn't
+            # produce one — live run4.slide4 "DNS Resolvers" was empty),
+            # stripping the stub yields a blank slide. Keep the stub for
+            # fixed_png_content donors when neither table nor infographic
+            # is available — the placeholder PNG is preferable to nothing.
+            base_remove = list(donor_def.get("remove_before_fill", []))
+            dtype_pre = donor_def.get("donor_type")
+            has_replacement = bool(
+                plan_slide.get("table_data")
+                or plan_slide.get("infographic")
+            )
+            if dtype_pre == "fixed_png_content" and not has_replacement:
+                if base_remove:
+                    print(
+                        f"WARN: donor {src_num} fixed_png_content без "
+                        f"table_data/infographic — оставляю PNG-stub "
+                        f"(remove_before_fill={base_remove} suppressed)",
+                        file=sys.stderr,
+                    )
+                base_remove = []
+            remove_idx_list = base_remove
             remove_idx_list += list(plan_slide.get("remove_shapes", []))
 
             # remove_if_user_provides_table: например donor 53 имеет PNG-таблицу-заглушку

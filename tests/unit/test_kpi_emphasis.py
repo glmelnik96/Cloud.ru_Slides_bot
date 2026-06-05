@@ -192,6 +192,60 @@ def test_emphasize_falls_back_to_graphite_on_green_box(blank_slide) -> None:
     assert _count_emphasized_runs_with_color(slide, "26D07C") == 0
 
 
+def test_emphasize_falls_back_to_graphite_when_overlapping_green(blank_slide) -> None:
+    """P0-1 (2026-06-05): Agent 06 native infographics layer a *text shape*
+    (fill=none) ON TOP of a separate green-filled rounded_rect. The text
+    shape itself isn't green so the legacy D2 check missed it — emphasis
+    painted digits green-on-green, hiding them (live run4.slide8 lost
+    "12.17" inside the middle accent block). The overlap detector must
+    catch this and switch to graphite."""
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Emu
+
+    prs, slide = blank_slide
+    # 1. Green-filled backing rect (Agent 06 rounded_rect).
+    green = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                   Emu(4286250), Emu(3143250),
+                                   Emu(3190350), Emu(1143000))
+    green.fill.solid()
+    green.fill.fore_color.rgb = RGBColor(0x26, 0xD0, 0x7C)
+    # No text on the backing rect (matches Agent 06 plan).
+
+    # 2. Text shape sitting on top — its own fill is "none".
+    text_box = slide.shapes.add_textbox(
+        Emu(4381500), Emu(3238500), Emu(2990850), Emu(476250)
+    )
+    text_box.fill.background()  # no fill — relies on the green rect behind.
+    tf = text_box.text_frame
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = "v1.12.17 (апрель)"
+    run.font.size = Pt(14)
+
+    n = emphasize_kpi_in_slide(slide)
+    assert n >= 1, "KPI token in overlay text must still be emphasized"
+    # Must be GRAPHITE because the underlying green rect would make
+    # green-on-green invisible.
+    assert _count_emphasized_runs_with_color(slide, "222222") >= 1, (
+        "overlap-with-green detection should have picked graphite"
+    )
+    assert _count_emphasized_runs_with_color(slide, "26D07C") == 0, (
+        "no run should still be coloured green"
+    )
+
+
+def test_emphasize_uses_green_when_no_overlap(blank_slide) -> None:
+    """Sanity: a text shape that doesn't sit on a green rect still gets
+    the regular green emphasis (regression guard for the P0-1 detector
+    erroneously flagging unrelated shapes)."""
+    prs, slide = blank_slide
+    _add_textbox(slide, "Выручка 1,2 млн в Q1", size_pt=14)
+    n = emphasize_kpi_in_slide(slide)
+    assert n >= 1
+    assert _count_emphasized_runs_with_color(slide, "26D07C") >= 1
+
+
 def test_emphasize_preserves_surrounding_text(blank_slide) -> None:
     """Run-splitting keeps the non-number text in separate plain runs."""
     prs, slide = blank_slide

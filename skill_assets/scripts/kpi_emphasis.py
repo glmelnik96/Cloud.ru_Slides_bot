@@ -108,6 +108,65 @@ def _shape_fill_hex(shape) -> str | None:
         return None
 
 
+def _shape_bbox(shape) -> tuple[int, int, int, int] | None:
+    """Return (left, top, right, bottom) in EMU for a shape, or ``None`` if
+    coordinates are unavailable. Used by overlap detection."""
+    try:
+        left = int(shape.left or 0)
+        top = int(shape.top or 0)
+        w = int(shape.width or 0)
+        h = int(shape.height or 0)
+    except Exception:  # noqa: BLE001
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return (left, top, left + w, top + h)
+
+
+def _collect_green_bboxes(slide) -> list[tuple[int, int, int, int]]:
+    """Collect bounding boxes of every shape on the slide whose solid fill
+    matches the brand-green palette. Used by P0-1 (2026-06-05): native
+    Agent-06 infographics layer a text shape with ``fill=none`` *on top
+    of* a green-filled ``rounded_rect``. The text shape itself reports
+    no green fill, so the legacy D2 check (parent fill only) misses it
+    and the KPI pass paints digits green-on-green → invisible.
+
+    Returns a list of (left, top, right, bottom) EMU tuples.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    for sh in slide.shapes:
+        fill_hex = _shape_fill_hex(sh)
+        if not fill_hex or fill_hex not in _GREEN_FILL_HEXES:
+            continue
+        bbox = _shape_bbox(sh)
+        if bbox is not None:
+            boxes.append(bbox)
+    return boxes
+
+
+def _bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+    return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+
+
+def _point_in_bbox(point: tuple[float, float],
+                   bbox: tuple[int, int, int, int]) -> bool:
+    x, y = point
+    return bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]
+
+
+def _sits_on_green(shape, green_boxes: list[tuple[int, int, int, int]]) -> bool:
+    """True if shape's geometric centre lies inside any green-filled
+    bounding box on the slide. Cheap proxy for "the shape visually sits
+    inside a green block"."""
+    if not green_boxes:
+        return False
+    bbox = _shape_bbox(shape)
+    if bbox is None:
+        return False
+    center = _bbox_center(bbox)
+    return any(_point_in_bbox(center, gb) for gb in green_boxes)
+
+
 def _emphasize_paragraph(p_el: etree._Element, *,
                          emphasis_hex: str = _GREEN_HEX) -> int:
     """Разбивает runs параграфа по KPI-токенам, делает их bold+<emphasis_hex>.
@@ -215,6 +274,11 @@ def emphasize_kpi_in_slide(slide) -> int:
     Возвращает количество подсвеченных токенов на слайде.
     """
     total = 0
+    # P0-1 (2026-06-05): pre-compute green bboxes once per slide so we
+    # can detect text shapes that visually sit ON TOP of a green-filled
+    # rect (Agent 06 native infographic pattern — see live run4.slide8
+    # "v1.12.17" lost its digits to green-on-green emphasis).
+    green_boxes = _collect_green_bboxes(slide)
     for shape in slide.shapes:
         if not shape.has_text_frame:
             continue
@@ -222,8 +286,12 @@ def emphasize_kpi_in_slide(slide) -> int:
             continue
         # D2 fix: if the shape fills green, emphasising in green produces
         # invisible text — fall back to graphite for readable contrast.
+        # P0-1 extension: also check overlap with separately-positioned
+        # green shapes (Agent 06 layers text shapes over filled rects).
         fill_hex = _shape_fill_hex(shape)
         if fill_hex and fill_hex in _GREEN_FILL_HEXES:
+            emphasis_hex = _GRAPHITE_HEX
+        elif _sits_on_green(shape, green_boxes):
             emphasis_hex = _GRAPHITE_HEX
         else:
             emphasis_hex = _GREEN_HEX

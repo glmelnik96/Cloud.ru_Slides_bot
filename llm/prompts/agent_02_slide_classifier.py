@@ -41,7 +41,8 @@ SYSTEM = f"""\
 ПРАВИЛО МАППИНГА intent → category (применяй сначала):
 - title → title
 - divider → divider
-- text (1–2 блока) → text
+- text (1–2 блока, 1-2 предложения) → text
+- text-список (4+ пунктов, перечисление городов/услуг/команд/опций) → multicolumn (subcategory_hint: "list" или "2col"); НЕ "text", т.к. donor "text" — это emphasis-карточка с body в нижней половине, и длинные списки выглядят пустыми сверху (live run3.slide6 «Адреса укрытий по городам», 7 строк, провалился именно по этому шаблону).
 - comparison (2–3 кол.) → multicolumn (subcategory_hint: "2col"/"3col")
 - comparison (4–8 блоков) → multicolumn (subcategory_hint: "4blocks"/"6blocks"/"8blocks")
 - timeline (≤8) → timeline (subcategory_hint: "timeline_8")
