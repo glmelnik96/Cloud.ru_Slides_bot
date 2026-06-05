@@ -258,3 +258,60 @@ def test_emphasize_preserves_surrounding_text(blank_slide) -> None:
     assert "Выручка" in full
     assert "1,2 млн" in full
     assert "Q1 2026" in full
+
+
+# ─── D2: inline phrase emphasis (**markup**) ──────────────────────────────────
+
+from kpi_emphasis import emphasize_phrases_in_slide  # noqa: E402
+
+
+def test_phrase_emphasis_marks_one_phrase(blank_slide) -> None:
+    prs, slide = blank_slide
+    _add_textbox(slide, "Платформа даёт **полную изоляцию данных** для клиентов",
+                 size_pt=14)
+    n = emphasize_phrases_in_slide(slide, emphasis_hex="26D07C")
+    assert n == 1
+    assert _count_emphasized_runs_with_color(slide, "26D07C") == 1
+    # markup stripped — no literal asterisks remain.
+    assert "**" not in slide.shapes[-1].text_frame.text
+    assert "полную изоляцию данных" in slide.shapes[-1].text_frame.text
+
+
+def test_phrase_emphasis_at_most_one_per_paragraph(blank_slide) -> None:
+    prs, slide = blank_slide
+    _add_textbox(slide, "**первая** и потом **вторая** фраза", size_pt=14)
+    n = emphasize_phrases_in_slide(slide, emphasis_hex="26D07C")
+    # Only the first marked phrase is emphasized; the rest is de-marked plain.
+    assert n == 1
+    assert _count_emphasized_runs_with_color(slide, "26D07C") == 1
+    assert "**" not in slide.shapes[-1].text_frame.text
+
+
+def test_phrase_emphasis_skips_long_phrase(blank_slide) -> None:
+    prs, slide = blank_slide
+    _add_textbox(slide, "итог **одно два три четыре пять шесть семь слов тут**",
+                 size_pt=14)
+    n = emphasize_phrases_in_slide(slide, emphasis_hex="26D07C")
+    assert n == 0
+    # markup is still stripped even when not emphasized.
+    assert "**" not in slide.shapes[-1].text_frame.text
+
+
+def test_phrase_emphasis_strips_markup_without_color_on_dark(blank_slide) -> None:
+    """On dark slides we strip markup but do NOT emphasize (canon: no green
+    text where it would clash). emphasis_hex=None means strip-only."""
+    prs, slide = blank_slide
+    _add_textbox(slide, "тёмный слайд с **важной фразой** внутри", size_pt=14)
+    n = emphasize_phrases_in_slide(slide, emphasis_hex=None)
+    assert n == 0
+    assert "**" not in slide.shapes[-1].text_frame.text
+    assert "важной фразой" in slide.shapes[-1].text_frame.text
+
+
+def test_phrase_emphasis_noop_without_markup(blank_slide) -> None:
+    prs, slide = blank_slide
+    before = "обычный текст без разметки совсем"
+    _add_textbox(slide, before, size_pt=14)
+    n = emphasize_phrases_in_slide(slide, emphasis_hex="26D07C")
+    assert n == 0
+    assert slide.shapes[-1].text_frame.text.strip() == before

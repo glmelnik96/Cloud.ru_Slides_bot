@@ -242,6 +242,96 @@ def _emphasize_paragraph(p_el: etree._Element, *,
     return emphasized
 
 
+# D2 (2026-06-06): inline key-phrase emphasis. Agent 03 marks ONE key phrase
+# per body paragraph with **…**. We strip the markup and (on light slides)
+# bold+green the span — matching template slide 28. Guardrails: ≤1 phrase per
+# paragraph, ≤6 words; on dark slides emphasis_hex=None → strip-only.
+_PHRASE_RE = re.compile(r"\*\*(?P<phrase>[^*]+?)\*\*")
+_PHRASE_MAX_WORDS = 6
+
+
+def _strip_markers_in_run(r: etree._Element) -> None:
+    """Remove any literal ** markers from a run's text in place."""
+    t_el = r.find(qn("a:t"))
+    if t_el is not None and t_el.text and "**" in t_el.text:
+        t_el.text = t_el.text.replace("**", "")
+
+
+def _emphasize_phrase_paragraph(p_el: etree._Element, *,
+                                emphasis_hex: str | None) -> int:
+    """Strip the first **…** span in the paragraph; if ``emphasis_hex`` is set
+    and the phrase is ≤_PHRASE_MAX_WORDS words, bold+colour it. All remaining
+    **…** markers in the paragraph are stripped to plain text. Returns 1 if a
+    phrase was emphasized, else 0."""
+    runs = p_el.findall(qn("a:r"))
+    if not runs:
+        return 0
+    emphasized = 0
+    for r in list(runs):
+        if emphasized:  # already used our one-per-paragraph budget
+            _strip_markers_in_run(r)
+            continue
+        t_el = r.find(qn("a:t"))
+        if t_el is None or not t_el.text or "**" not in t_el.text:
+            continue
+        text = t_el.text
+        m = _PHRASE_RE.search(text)
+        if m is None:
+            _strip_markers_in_run(r)
+            continue
+        phrase = m.group("phrase")
+        n_words = len([w for w in phrase.split() if w])
+        do_color = emphasis_hex is not None and 1 <= n_words <= _PHRASE_MAX_WORDS
+        parent = r.getparent()
+        insert_idx = list(parent).index(r)
+        new_runs: list[etree._Element] = []
+        # pre
+        if m.start() > 0:
+            pre = deepcopy(r)
+            pre.find(qn("a:t")).text = text[:m.start()]
+            new_runs.append(pre)
+        # phrase
+        ph = deepcopy(r)
+        ph.find(qn("a:t")).text = phrase
+        if do_color:
+            ph_rPr = ph.find(qn("a:rPr"))
+            if ph_rPr is None:
+                ph_rPr = etree.SubElement(ph, qn("a:rPr"))
+                ph.insert(0, ph_rPr)
+            _set_run_emphasis(ph_rPr, color_hex=emphasis_hex)
+            emphasized = 1
+        new_runs.append(ph)
+        # tail — strip any further ** markers here (one-phrase budget per
+        # paragraph; the tail run isn't revisited by the outer loop).
+        if m.end() < len(text):
+            tail = deepcopy(r)
+            tail.find(qn("a:t")).text = text[m.end():].replace("**", "")
+            new_runs.append(tail)
+        parent.remove(r)
+        for i, nr in enumerate(new_runs):
+            parent.insert(insert_idx + i, nr)
+    return emphasized
+
+
+def emphasize_phrases_in_slide(slide, *, emphasis_hex: str | None) -> int:
+    """Apply D2 phrase emphasis to every non-title body shape. Returns the
+    number of phrases emphasized on the slide."""
+    total = 0
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        if _shape_is_title_like(shape):
+            continue
+        txBody = shape.text_frame._txBody
+        for p_el in txBody.findall(qn("a:p")):
+            try:
+                total += _emphasize_phrase_paragraph(p_el, emphasis_hex=emphasis_hex)
+            except Exception as e:  # noqa: BLE001 — never fail the build
+                print(f"WARN: phrase emphasis paragraph failed: {e}",
+                      file=sys.stderr)
+    return total
+
+
 def _shape_is_title_like(shape) -> bool:
     """Эвристика: shape — это title, если есть placeholder type=TITLE
     либо если первый run >= 28pt."""
@@ -323,14 +413,20 @@ def apply_kpi_emphasis(prs, *, skip_slide_types: set[str] | None = None,
     total = 0
     touched = 0
     slides = list(prs.slides)
+    phrases = 0
     for idx, slide in enumerate(slides):
+        plan = (plan_slides[idx] or {}) if plan_slides and idx < len(plan_slides) else {}
+        st = plan.get("slide_type")
         # Skip native slides where the renderer has already styled numbers.
-        if plan_slides and idx < len(plan_slides):
-            st = (plan_slides[idx] or {}).get("slide_type")
-            if st in skip_types:
-                continue
+        if st in skip_types:
+            continue
+        # D2: phrase emphasis — green on light, strip-only on dark.
+        dark = bool(plan.get("dark", False))
+        phrases += emphasize_phrases_in_slide(
+            slide, emphasis_hex=(None if dark else _GREEN_HEX))
+        # Numeric auto-green pass (unchanged).
         n = emphasize_kpi_in_slide(slide)
         if n:
             total += n
             touched += 1
-    return {"total": total, "slides_touched": touched}
+    return {"total": total, "slides_touched": touched, "phrases": phrases}
