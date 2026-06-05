@@ -946,6 +946,17 @@ def render_card_grid(slide, cfg, dark=False):
     avail_h = SAFE_BOTTOM - top
     cw = int((SAFE_W - (cols - 1) * gap) / cols)
     ch = int((avail_h - (n_rows - 1) * gap) / n_rows)
+    # D4 part 2 (2026-06-06): center a short grid vertically — when the grid's
+    # natural height (capped row height) leaves slack, push it down by half so
+    # the bottom half isn't empty. Recompute ch from a sane max row height.
+    if not cfg.get("content_top"):  # only when caller didn't pin the top
+        max_ch = cfg.get("max_row_height", 230)
+        if ch > max_ch:
+            ch = max_ch
+            used_h = n_rows * ch + (n_rows - 1) * gap
+            slack = avail_h - used_h
+            if slack > 0:
+                top = top + slack // 2
     pad = cfg.get("pad", 22)
     chip = cfg.get("chip_size", 44)
     title_size = cfg.get("title_size", 20)
