@@ -504,7 +504,7 @@ def _shape_is_title_like(shape) -> bool:
     return False
 
 
-def clear_donor_non_title_text(slide) -> int:
+def clear_donor_non_title_text(slide, preserve_shape_idx=None) -> int:
     """Strip text from every non-title shape on the slide.
 
     Run before injecting infographic shapes so donor decoration labels
@@ -513,47 +513,58 @@ def clear_donor_non_title_text(slide) -> int:
     keeps its visual shape (fill/stroke). Recurses into groups and
     table cells so the cleanup is complete.
 
+    F1 (2026-06-05): added ``preserve_shape_idx`` so Case A in build_v9
+    (structural donor with real filled body slots, overlay dropped by B5)
+    can wipe non-slot decoration without erasing the just-filled slot
+    text. Indices are top-level shape positions in ``slide.shapes``;
+    only top-level shapes consult the preserve set — nested group
+    children are never slot-mapped and always cleared.
+
     Returns count of shapes whose text was cleared.
     """
     cleared = 0
+    preserve = set(preserve_shape_idx or ())
     try:
         from build_v5 import clear_text_frame
     except ImportError:
         return 0
 
-    def _walk(shapes):
+    def _process(sh):
         nonlocal cleared
-        for sh in shapes:
-            # Groups: recurse.
-            try:
-                if sh.shape_type == 6:  # MSO_SHAPE_TYPE.GROUP
-                    _walk(sh.shapes)
-                    continue
-            except Exception:  # noqa: BLE001
-                pass
-            # Tables: blank every cell text frame (table itself is decoration).
-            if getattr(sh, "has_table", False) and sh.has_table:
-                for row in sh.table.rows:
-                    for cell in row.cells:
-                        try:
-                            clear_text_frame(cell.text_frame)
-                            cleared += 1
-                        except Exception:  # noqa: BLE001
-                            pass
-                continue
-            if not getattr(sh, "has_text_frame", False):
-                continue
-            if _shape_is_title_like(sh):
-                continue
-            text = (sh.text_frame.text or "").strip()
-            if not text:
-                continue
-            try:
-                clear_text_frame(sh.text_frame)
-                cleared += 1
-            except Exception as e:  # noqa: BLE001
-                print(f"WARN: clear_donor_non_title_text failed: {e}",
-                      file=sys.stderr)
+        # Groups: recurse (no preservation; slots are never inside groups).
+        try:
+            if sh.shape_type == 6:  # MSO_SHAPE_TYPE.GROUP
+                for child in sh.shapes:
+                    _process(child)
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        # Tables: blank every cell text frame (table itself is decoration).
+        if getattr(sh, "has_table", False) and sh.has_table:
+            for row in sh.table.rows:
+                for cell in row.cells:
+                    try:
+                        clear_text_frame(cell.text_frame)
+                        cleared += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+            return
+        if not getattr(sh, "has_text_frame", False):
+            return
+        if _shape_is_title_like(sh):
+            return
+        text = (sh.text_frame.text or "").strip()
+        if not text:
+            return
+        try:
+            clear_text_frame(sh.text_frame)
+            cleared += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN: clear_donor_non_title_text failed: {e}",
+                  file=sys.stderr)
 
-    _walk(slide.shapes)
+    for idx, sh in enumerate(slide.shapes):
+        if idx in preserve:
+            continue
+        _process(sh)
     return cleared

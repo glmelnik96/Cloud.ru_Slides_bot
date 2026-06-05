@@ -151,3 +151,102 @@ def test_nonstructural_donor_keeps_overlay(tmp_workdir) -> None:
     assert _OVERLAY_MARKER_B in txt, (
         "Agent 06 overlay shape missing on non-structural donor 21"
     )
+
+
+# ---------------------------------------------------------------------------
+# F1 (2026-06-05): Case A vs Case B disambiguation.
+#
+# Live run7 (eb6c4ceec3024bd9) showed that when the distributor produced a
+# structural donor with only the title filled, B5 dropped the overlay AND
+# nothing cleared the donor mock decoration ("Подзаголовок в две строки").
+# The fix: drop overlay only when ≥2 body slots are filled; otherwise keep
+# overlay AND clear donor mock decoration.
+# ---------------------------------------------------------------------------
+
+
+def test_case_b_structural_donor_underfilled_keeps_overlay(tmp_workdir) -> None:
+    """Case B: structural donor 34 with ONLY title filled + matrix overlay
+    → overlay MUST be rendered (otherwise the slide would be visually empty).
+    """
+    plan_slide = {
+        "clone_from_slide": 34,
+        "slots": {
+            "title": "Underfilled structural donor",
+            # sub1/sub2/sub3, body1/body2/body3 deliberately omitted —
+            # this is what live run7 distributor produced.
+        },
+        "infographic": {
+            "type": "matrix",
+            "shapes": _matrix_shapes(),
+        },
+    }
+    out = _build_one(tmp_workdir, plan_slide)
+    prs = Presentation(out)
+    txt = _slide_text(prs.slides[0])
+    # Overlay markers MUST be present — Case B keeps overlay so the slide
+    # has actual content.
+    assert _OVERLAY_MARKER_A in txt, (
+        "Case B: overlay must be kept when structural donor is underfilled"
+    )
+    assert _OVERLAY_MARKER_B in txt, (
+        "Case B: overlay must be kept when structural donor is underfilled"
+    )
+
+
+def test_case_a_one_filled_body_slot_keeps_overlay(tmp_workdir) -> None:
+    """Boundary: structural donor 34 with ONLY 1 body slot filled (below
+    the Case-A threshold of ≥2) → overlay must be KEPT, not dropped.
+
+    Guards against an off-by-one in the filled_body_slots threshold.
+    """
+    plan_slide = {
+        "clone_from_slide": 34,
+        "slots": {
+            "title": "Single body slot",
+            "body1": "lonely content",
+            # sub*/body2/body3 deliberately omitted
+        },
+        "infographic": {
+            "type": "matrix",
+            "shapes": _matrix_shapes(),
+        },
+    }
+    out = _build_one(tmp_workdir, plan_slide)
+    prs = Presentation(out)
+    txt = _slide_text(prs.slides[0])
+    # Overlay markers MUST be present — only 1 body filled < 2 threshold.
+    assert _OVERLAY_MARKER_A in txt, (
+        "1 filled body slot is below Case-A threshold; overlay must remain"
+    )
+
+
+def test_case_a_preserves_filled_slot_text(tmp_workdir) -> None:
+    """Case A: structural donor 34 with all 6 body slots filled + matrix
+    overlay → overlay dropped (B5) AND filled slot text (alpha/beta/gamma)
+    survives the non-title cleanup pass.
+
+    Regression guard: an earlier draft of F1 wiped filled slots because
+    `clear_donor_non_title_text` had no awareness of slot mapping.
+    """
+    plan_slide = {
+        "clone_from_slide": 34,
+        "slots": {
+            "title": "Three columns",
+            "sub1": "A", "sub2": "B", "sub3": "C",
+            "body1": "alpha-CASE-A", "body2": "beta-CASE-A", "body3": "gamma-CASE-A",
+        },
+        "infographic": {
+            "type": "matrix",
+            "shapes": _matrix_shapes(),
+        },
+    }
+    out = _build_one(tmp_workdir, plan_slide)
+    prs = Presentation(out)
+    txt = _slide_text(prs.slides[0])
+    # Overlay dropped.
+    assert _OVERLAY_MARKER_A not in txt
+    assert _OVERLAY_MARKER_B not in txt
+    # Filled slot content preserved through the F1 cleanup pass.
+    assert "alpha-CASE-A" in txt, "Case A: filled body slot text was wiped"
+    assert "beta-CASE-A" in txt, "Case A: filled body slot text was wiped"
+    assert "gamma-CASE-A" in txt, "Case A: filled body slot text was wiped"

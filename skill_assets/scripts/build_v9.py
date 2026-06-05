@@ -422,14 +422,57 @@ def build(plan_path, template_path, output_path, donor_map_path):
         donor_already_structural = (
             donor_cat in _STRUCTURAL_DONOR_CATS and info_type in _OVERLAY_TYPES
         )
-        if info_shapes and donor_already_structural:
+
+        # F1+F2 (2026-06-05): post-run7 visual review (eb6c4ceec3024bd9)
+        # showed donor mock decoration ("Подзаголовок в две строки 20pt")
+        # leaking through whenever the distributor produced a structural
+        # donor with only the title slot filled and B5 dropped the overlay.
+        # Two situations to disambiguate:
+        #   Case A — distributor filled real body slots: drop overlay AND
+        #       clear non-slot decoration only (keep the filled slot text).
+        #   Case B — distributor filled only title/caption: keep the overlay
+        #       (otherwise the slide has no content at all) AND clear ALL
+        #       non-title text under the overlay.
+        filled_body_slots_count = 0
+        filled_slot_shape_indices: set[int] = set()
+        if donor_def is not None:
+            _slot_defs_local = donor_def.get("slots", {})
+            for _slot_name, _slot_val in (plan_slide.get("slots") or {}).items():
+                if _slot_name in ("title", "caption"):
+                    continue
+                if not str(_slot_val or "").strip():
+                    continue
+                if _slot_name not in _slot_defs_local:
+                    continue
+                filled_body_slots_count += 1
+                _idx = _slot_defs_local[_slot_name].get("shape_idx")
+                if isinstance(_idx, int):
+                    filled_slot_shape_indices.add(_idx)
+
+        case_a_drop_overlay = bool(
+            info_shapes and donor_already_structural
+            and filled_body_slots_count >= 2
+        )
+        if case_a_drop_overlay:
             print(
                 f"infographic: SKIP donor={src_num} cat={donor_cat} "
-                f"already covers infographic_type={info_type} "
-                f"(skip-overlay rule B5)", file=sys.stderr,
+                f"info_type={info_type} filled_body_slots={filled_body_slots_count} "
+                "(skip-overlay rule B5/Case-A)", file=sys.stderr,
             )
             info_shapes = []
-        if info_shapes and INFOGRAPHIC_RENDERER_AVAILABLE:
+        elif info_shapes and donor_already_structural:
+            # Case B: structural donor but distributor underfilled — keep
+            # the overlay so the slide has actual content. Cleanup below
+            # will wipe donor mock decoration before the overlay paints.
+            print(
+                f"infographic: KEEP donor={src_num} cat={donor_cat} "
+                f"info_type={info_type} filled_body_slots={filled_body_slots_count} "
+                "(Case-B: donor underfilled, overlay carries content)",
+                file=sys.stderr,
+            )
+
+        needs_cleanup = bool(info_shapes) or case_a_drop_overlay
+        if needs_cleanup and INFOGRAPHIC_RENDERER_AVAILABLE:
             try:
                 # D1+D8 (2026-06-05): clear ALL non-title donor text before
                 # injecting infographic shapes. Donors often have pre-labeled
@@ -439,14 +482,28 @@ def build(plan_path, template_path, output_path, donor_map_path):
                 # (run1.slide7 verified). clear_donor_body_slots is now a
                 # weaker layer behind the full-slide pass; we keep calling it
                 # for the count.
-                cleared = clear_donor_body_slots(actual, donor_def) if donor_def else 0
-                cleared_all = clear_donor_non_title_text(actual)
-                added = render_infographic_shapes(actual, info_shapes)
+                cleared = (
+                    clear_donor_body_slots(actual, donor_def)
+                    if donor_def and info_shapes else 0
+                )
+                if case_a_drop_overlay:
+                    # Preserve filled-slot text so we don't wipe what the
+                    # distributor put into sub*/body* slots.
+                    cleared_all = clear_donor_non_title_text(
+                        actual, preserve_shape_idx=filled_slot_shape_indices,
+                    )
+                else:
+                    cleared_all = clear_donor_non_title_text(actual)
+                added = (
+                    render_infographic_shapes(actual, info_shapes)
+                    if info_shapes else 0
+                )
                 if added or cleared or cleared_all:
                     print(
                         f"infographic: slide donor={src_num} type={info_block.get('type')} "
                         f"shapes_added={added}/{len(info_shapes)} "
-                        f"donor_slots_cleared={cleared} non_title_cleared={cleared_all}",
+                        f"donor_slots_cleared={cleared} non_title_cleared={cleared_all} "
+                        f"case_a_drop_overlay={case_a_drop_overlay}",
                         file=sys.stderr,
                     )
             except Exception as e:  # noqa: BLE001 — never fail the build
