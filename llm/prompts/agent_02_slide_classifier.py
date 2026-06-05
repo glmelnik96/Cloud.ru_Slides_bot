@@ -30,7 +30,7 @@ SYSTEM = f"""\
       kpi: {{title: string, numbers: [{{value: string, desc: string, pct: boolean, accent: boolean}}]}} | null,
       chart: {{type: "area_stacked"|"area_100"|"bar"|"bar_stacked"|"line"|"pie", title: string, caption: string, x: any[], series: [{{name: string, data: number[]}}], accent_idx: number}} | null,
       table: {{header: string, subtitle: string, style: "zebra", headers: string[], data: string[][], first_col_wider: boolean}} | null,
-      flow: {{header: string, subtitle: string, grid: boolean, cols: number|null, blocks: object[], arrows: object[]}} | null,
+      flow: {{header: string, subtitle: string, preset: "card_grid"|"numbered_columns"|"numbered_rows"|"hero_statement"|null, cards: [{{title: string, text: string}}], columns: [{{title: string, text: string, number: string}}], rows: [{{title: string, text: string}}], statement: string, support: string, grid: boolean, cols: number|null, blocks: object[], arrows: object[]}} | null,
       image: {{title: string, image_path: string, caption: string}} | null,
       _source_slide: number|null,        // если slide родился от split — номер исходного
       _split_part: string|null           // "1/2", "2/2"
@@ -44,10 +44,10 @@ SYSTEM = f"""\
 - text (1–2 блока, 1-2 предложения) → text
 - text-список (4+ пунктов, перечисление городов/услуг/команд/опций) → multicolumn (subcategory_hint: "list" или "2col"); НЕ "text", т.к. donor "text" — это emphasis-карточка с body в нижней половине, и длинные списки выглядят пустыми сверху (live run3.slide6 «Адреса укрытий по городам», 7 строк, провалился именно по этому шаблону).
 - comparison (2–3 кол.) → multicolumn (subcategory_hint: "2col"/"3col")
-- comparison (4–8 блоков) → multicolumn (subcategory_hint: "4blocks"/"6blocks"/"8blocks")
+- comparison/возможности/сервисы (4–8 блоков «заголовок + описание», параллельные, без стрелок) → ПРЕДПОЧТИТЕЛЬНО flow_diagram_native + flow.preset="card_grid" (см. NATIVE FLOW-ПРЕСЕТЫ). Donor-route multicolumn (subcategory_hint "6blocks"/"8blocks" → donor 33/35) — запасной вариант, если блоки без чёткой пары заголовок+описание.
 - timeline (≤8) → timeline (subcategory_hint: "timeline_8")
 - timeline (9–10) → timeline (subcategory_hint: "timeline_10")
-- team → team (subcategory_hint: "team_3"/"team_4"/"team_5"/"team_10")
+- team С ФОТО (есть фотографии людей) → team (subcategory_hint: "team_3"/"team_4"/"team_5"/"team_10"). БЕЗ фото (только имя+роль/должность, текст) → flow_diagram_native + flow.preset="card_grid", flow.cards=[{{title=имя, text=роль}}], category=other. Причина: donor-team (49/50/51/71) — фото-макеты, их текстовые слоты НЕ замаплены; команда без фото туда уходит пустой (рамки без подписей + утечка mock-текста, live deck_b.slide5). card_grid рендерит имя+роль чисто.
 - data (1 KPI) → callout
 - data (2–3 KPI) → multicolumn + slide_type=kpi_native
 - image (>50% фото) → image (subcategory_hint: "photo_full"/"photo_half"/"illustration_half")
@@ -62,6 +62,16 @@ SYSTEM = f"""\
 - Регулярная таблица ≥3×3 без объединённых ячеек → table_native (style="zebra", first_col_wider=true по умолчанию)
 - Схема/процесс с блоками+стрелками → flow_diagram_native (grid=true когда блоки укладываются в равные колонки)
 - Иначе category-only (slide_type=null) — пойдёт через donor.
+
+NATIVE FLOW-ПРЕСЕТЫ (правило диверсификации, 2026-06-05):
+Нативные пресеты рендерятся на ЧИСТОМ холсте и выглядят дизайнернее/надёжнее, чем donor-клоны 33/35. Предпочитай их для структурированного параллельного/последовательного контента. Заполняй flow.preset + соответствующий массив РЕАЛЬНЫМ текстом из brief (не выдумывая фактов). Всегда задавай flow.header.
+- 4–8 параллельных пунктов «подзаголовок + 1 фраза описания» (преимущества, возможности, сервисы, фичи — БЕЗ последовательности и стрелок) → slide_type=flow_diagram_native, flow.preset="card_grid", flow.cards=[{{title,text}}], category=other. cols: 2 (4 шт) / 3 (5-6 шт) / 4 (7-8 шт).
+- Последовательность/процесс/этапы 3–5 шагов (есть порядок 01→02→03) → flow.preset="numbered_columns", flow.columns=[{{title,text,number}}], category=other.
+- Последовательность/чеклист/перечень 6–8 пунктов с порядком → flow.preset="numbered_rows", flow.rows=[{{title,text}}], cols=2, category=other.
+- Один мощный тезис/слоган/ценностное утверждение (≤10 слов) → flow.preset="hero_statement", flow.statement="…", flow.support="…" (опц.), category=other.
+- Настоящая схема со связями/ветвлением (стрелки между конкретными блоками) → НЕ пресет: flow.blocks+flow.arrows, grid=true.
+- Когда preset задан — blocks/arrows оставь пустыми ([]). Когда blocks задан — preset=null.
+- Простой текст-список без структуры «заголовок+описание» (адреса, города, короткие строки) → НЕ flow, а category=multicolumn (donor route).
 
 ПРАВИЛА SPLIT (детерминированно, при необходимости разбивай слайд на 2 записи):
 - 4+ KPI одного типа → split на 2 (3+1 или 2+2)

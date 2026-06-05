@@ -191,6 +191,11 @@ def _sanitize_native_block(slide_type: str, key: str, block: Any) -> Any:
     if not isinstance(block, dict):
         return block
     if key == "flow" and slide_type == "flow_diagram_native":
+        # Preset archetypes own their layout — flow_renderer dispatches to the
+        # preset function and returns before the grid/blocks path. Forcing
+        # grid=true here would be a no-op at best, so leave preset blocks alone.
+        if (block.get("preset") or "").strip():
+            return block
         blocks = block.get("blocks") or []
         if not block.get("grid"):
             has_coords = all(
@@ -257,6 +262,26 @@ def _native_block_is_usable(slide_type: str, cls: dict[str, Any]) -> bool:
         flow = cls.get("flow") or {}
         if not isinstance(flow, dict):
             return False
+        # Preset archetypes (card_grid / numbered_rows / numbered_columns /
+        # hero_statement) carry their content in preset-specific keys, NOT in
+        # the generic `blocks` list. Treat the slide as buildable when the
+        # preset's required data is present (flow_renderer reads these keys).
+        preset = (flow.get("preset") or "").strip()
+        if preset:
+            preset_data_keys = {
+                "card_grid": "cards",
+                "numbered_rows": "rows",
+                "numbered_columns": "columns",
+                "hero_statement": "statement",
+            }
+            data_key = preset_data_keys.get(preset)
+            if data_key is None:
+                # Unknown preset → fall through to blocks check below.
+                pass
+            elif flow.get(data_key):
+                return True
+            else:
+                return False
         if not (flow.get("blocks") or []):
             return False
         return True

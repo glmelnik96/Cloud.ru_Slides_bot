@@ -185,17 +185,45 @@ donors:
 
   33:
     category: content_6subtitles
-    description: "6 блоков (2x3) с подзаголовками 20pt + body 14pt"
+    description: "6 блоков (2x3) с подзаголовками 20pt Bold + body 14pt"
+    canonical_rule: "Подзаголовки блоков ВСЕГДА чёрные Bold, не зелёные (canonical user 2026-05-02)"
     slots:
-      title: { shape_idx: 0, size_pt: 20, bold: true }
-      # 6 sub + 6 body — детали зависят от точного шаблона. TODO: уточнить shape_idx после inspect
+      title:    { shape_idx: 0,  size_pt: 20, bold: true, max_chars: 50, safe_max_chars: 40, canonical_color: "#222222" }
+      sub1:     { shape_idx: 7,  size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub2:     { shape_idx: 8,  size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub3:     { shape_idx: 9,  size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub4:     { shape_idx: 10, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub5:     { shape_idx: 11, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub6:     { shape_idx: 12, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      body1:    { shape_idx: 1,  size_pt: 14, max_chars: 160, safe_max_chars: 120, canonical_color: "#222222" }
+      body2:    { shape_idx: 2,  size_pt: 14, max_chars: 160, safe_max_chars: 120, canonical_color: "#222222" }
+      body3:    { shape_idx: 5,  size_pt: 14, max_chars: 160, safe_max_chars: 120, canonical_color: "#222222" }
+      body4:    { shape_idx: 3,  size_pt: 14, max_chars: 160, safe_max_chars: 120, canonical_color: "#222222" }
+      body5:    { shape_idx: 4,  size_pt: 14, max_chars: 160, safe_max_chars: 120, canonical_color: "#222222" }
+      body6:    { shape_idx: 6,  size_pt: 14, max_chars: 160, safe_max_chars: 120, canonical_color: "#222222" }
 
   35:
     category: content_8subtitles
     description: "8 блоков (2x4) — самый плотный multicolumn"
+    canonical_rule: "Подзаголовки блоков ВСЕГДА чёрные Bold, не зелёные (canonical user 2026-05-02)"
     slots:
-      title: { shape_idx: 0, size_pt: 20, bold: true }
-      # 8 sub + 8 body
+      title:    { shape_idx: 0,  size_pt: 20, bold: true, max_chars: 50, safe_max_chars: 40, canonical_color: "#222222" }
+      sub1:     { shape_idx: 9,  size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub2:     { shape_idx: 10, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub3:     { shape_idx: 11, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub4:     { shape_idx: 12, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub5:     { shape_idx: 13, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub6:     { shape_idx: 14, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub7:     { shape_idx: 15, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      sub8:     { shape_idx: 16, size_pt: 20, bold: true, max_chars: 30, safe_max_chars: 22, canonical_color: "#222222", canonical_bold: true }
+      body1:    { shape_idx: 1,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body2:    { shape_idx: 2,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body3:    { shape_idx: 5,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body4:    { shape_idx: 7,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body5:    { shape_idx: 3,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body6:    { shape_idx: 4,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body7:    { shape_idx: 6,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
+      body8:    { shape_idx: 8,  size_pt: 14, max_chars: 120, safe_max_chars: 90, canonical_color: "#222222" }
 
   # =====================
   # === CALLOUTS ===
@@ -587,6 +615,8 @@ category_equivalence:
   content_2col:  [28]
   content_3col:  [34]
   content_4block: [29]
+  content_6subtitles: [33]
+  content_8subtitles: [35]
   content_text:  [21, 22]
   callout:       [41, 42]
   kpi:           [43, 44]

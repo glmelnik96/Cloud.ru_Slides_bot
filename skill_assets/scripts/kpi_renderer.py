@@ -273,6 +273,14 @@ def render_kpi(slide, kpi_config, dark=False):
         value = num["value"]
         has_pct = num.get("pct", False)
 
+        # Defensive normalize: value может уже нести хвостовой '%' (LLM
+        # проигнорировал контракт «value без %, pct — флаг»). Срезаем его и
+        # выводим через pct-надстрочник, иначе '%' рендерится дважды и
+        # переполняет фрейм (live run 2026-06-05, slide7 '99.97%').
+        if isinstance(value, str) and value.rstrip().endswith("%"):
+            value = value.rstrip()[:-1].rstrip()
+            has_pct = True
+
         # Canonical §4: 199pt frame ⇒ max 2 значащих цифры. Иначе overflow.
         # Применяем только к hero (199pt single number); для 130/100pt запас больше.
         if NUMBER_FONT >= 199:
