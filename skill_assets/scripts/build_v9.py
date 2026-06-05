@@ -407,6 +407,28 @@ def build(plan_path, template_path, output_path, donor_map_path):
         # дублируется в shape-списке инфографикa).
         info_block = plan_slide.get("infographic") or {}
         info_shapes = info_block.get("shapes") or []
+        info_type = (info_block.get("type") or "").lower()
+        # B5 (2026-06-05): live a337cc86 slide 12 showed donor 34's three
+        # native columns AND Agent 06's 9-shape matrix rendered together.
+        # If the donor itself IS a structural multicolumn/matrix layout,
+        # the donor's slots already cover the same visual job — skip the
+        # Agent 06 overlay entirely so we don't double-render.
+        donor_cat = (donor_def.get("category") or "").lower() if donor_def else ""
+        _STRUCTURAL_DONOR_CATS = (
+            "content_2col", "content_3col_subtitle", "content_4subtitles",
+            "content_6subtitles", "content_8subtitles", "content_4block",
+        )
+        _OVERLAY_TYPES = ("comparison", "matrix", "process", "flow", "tree")
+        donor_already_structural = (
+            donor_cat in _STRUCTURAL_DONOR_CATS and info_type in _OVERLAY_TYPES
+        )
+        if info_shapes and donor_already_structural:
+            print(
+                f"infographic: SKIP donor={src_num} cat={donor_cat} "
+                f"already covers infographic_type={info_type} "
+                f"(skip-overlay rule B5)", file=sys.stderr,
+            )
+            info_shapes = []
         if info_shapes and INFOGRAPHIC_RENDERER_AVAILABLE:
             try:
                 # D1+D8 (2026-06-05): clear ALL non-title donor text before

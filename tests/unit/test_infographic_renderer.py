@@ -197,19 +197,47 @@ def _add_textbox_with_text(slide, text: str, *, font_pt: int = 14):
     return box
 
 
-def test_clear_donor_non_title_text_clears_body_keeps_title(blank_slide) -> None:
-    """D1+D8 fix: non-title text on donor (process labels, comparison cells)
-    is cleared so Agent 06 shapes don't overlap pre-existing donor labels."""
-    title_box = _add_textbox_with_text(blank_slide, "Заголовок слайда", font_pt=24)
+def test_clear_donor_non_title_text_clears_all_non_placeholder_text(blank_slide) -> None:
+    """B2 (2026-06-05): live a337cc86 slides 7/9 had donor 33 column
+    sub-headers ("Подзаголовок в две строки") bleeding through behind
+    infographic boxes — they were 18-24pt textboxes (NOT placeholder
+    titles), so the old `font >= 18pt` heuristic protected them as
+    "title-like". New rule: only placeholder-TITLE is preserved; every
+    other text shape gets wiped regardless of font size."""
+    # Donor 33 decoration: sub-header at 22pt (looks title-like but isn't)
+    sub_header = _add_textbox_with_text(blank_slide, "Подзаголовок в две строки",
+                                        font_pt=22)
     body1 = _add_textbox_with_text(blank_slide, "Recorder", font_pt=14)
     body2 = _add_textbox_with_text(blank_slide, "Хранение данных", font_pt=12)
-
     cleared = clear_donor_non_title_text(blank_slide)
-    # Two body labels cleared, title kept.
-    assert cleared >= 2
-    assert "Заголовок" in title_box.text_frame.text
+    assert cleared >= 3  # all three should be wiped
+    assert (sub_header.text_frame.text or "").strip() == ""
     assert (body1.text_frame.text or "").strip() == ""
     assert (body2.text_frame.text or "").strip() == ""
+
+
+def test_clear_donor_non_title_text_preserves_real_title_placeholder() -> None:
+    """When a real title placeholder exists, its text must survive."""
+    prs = Presentation(str(skill_bridge.TEMPLATE_PATH))
+    # Use a layout that has a TITLE placeholder (layout 0 = title slide).
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    # Find and set the title placeholder.
+    title_text = "REAL TITLE PLACEHOLDER"
+    title_ph = None
+    for sh in slide.shapes:
+        try:
+            if sh.placeholder_format is not None and sh.placeholder_format.idx == 0:
+                sh.text_frame.text = title_text
+                title_ph = sh
+                break
+        except (ValueError, AttributeError):
+            continue
+    assert title_ph is not None, "test setup failed: no title placeholder"
+    # Add a body-like textbox that should be cleared.
+    body = _add_textbox_with_text(slide, "Body content", font_pt=14)
+    clear_donor_non_title_text(slide)
+    assert title_text in title_ph.text_frame.text  # preserved
+    assert (body.text_frame.text or "").strip() == ""  # cleared
 
 
 def test_clear_donor_non_title_text_handles_empty_slide(blank_slide) -> None:
@@ -217,8 +245,7 @@ def test_clear_donor_non_title_text_handles_empty_slide(blank_slide) -> None:
 
 
 def test_clear_donor_non_title_text_skips_already_empty(blank_slide) -> None:
-    """No body text → nothing to clear."""
-    _add_textbox_with_text(blank_slide, "Title", font_pt=24)
+    """No text → nothing to clear."""
     _add_textbox_with_text(blank_slide, "", font_pt=14)
     cleared = clear_donor_non_title_text(blank_slide)
     assert cleared == 0
@@ -305,3 +332,92 @@ def test_clamp_preserves_relative_order_and_gaps() -> None:
 def test_clamp_empty_input_returns_zero() -> None:
     assert _clamp_shapes_to_safe_area([]) == 0
     assert _clamp_shapes_to_safe_area([{"type": "text"}]) == 0  # no width
+
+
+# ─── B1 (2026-06-05): upscale branch for Agent 06 underscale hallucination ───
+
+def test_clamp_upscales_tiny_shapes() -> None:
+    """Live run 29e189bb.slide4 (2026-06-05): GLM-5.1 emitted 3 process
+    blocks at width_emu=352425 (37 px) on a 1280-px canvas — total span
+    179 px = 15% of safe-area. Clamp must scale UP to ~95% of safe width."""
+    # 3 blocks at x=30, 90, 150, each 37px wide → span 30..187 = 157 px
+    shapes = [
+        _block(30, 37),
+        _block(90, 37),
+        _block(150, 37),
+    ]
+    mutated = _clamp_shapes_to_safe_area(shapes)
+    assert mutated == 3, "all 3 undersized blocks should be upscaled"
+    # After upscale, the span should occupy most of safe-area (~95% × 1220px).
+    min_left = min(s["left_emu"] for s in shapes)
+    max_right = max(s["left_emu"] + s["width_emu"] for s in shapes)
+    span_px = (max_right - min_left) / _EMU
+    assert 1000 <= span_px <= 1230, f"expected ~1100-1220 px span, got {span_px:.0f}"
+    # First block must start at safe.left (30 px) after shift.
+    assert abs(shapes[0]["left_emu"] - 30 * _EMU) < 5000
+
+
+def test_clamp_upscales_tiny_comparison_2cols() -> None:
+    """Live run 29e189bb.slide2: comparison (6 shapes) spanning 149 px
+    on a 1220-px safe-area. Must upscale; relative gap between two
+    columns must be preserved."""
+    shapes = [
+        # Col1: rect + 2 text labels
+        _block(30, 57, top_px=54, height_px=140),
+        _block(38, 41, top_px=59, height_px=56, type_="text"),
+        _block(38, 41, top_px=115, height_px=56, type_="text"),
+        # Col2: rect + 2 text labels
+        _block(92, 57, top_px=54, height_px=140),
+        _block(100, 41, top_px=59, height_px=56, type_="text"),
+        _block(100, 41, top_px=115, height_px=56, type_="text"),
+    ]
+    mutated = _clamp_shapes_to_safe_area(shapes)
+    assert mutated >= 6
+    # The 2 columns should now be far apart (not 5px apart as before).
+    col1_right = shapes[0]["left_emu"] + shapes[0]["width_emu"]
+    col2_left = shapes[3]["left_emu"]
+    gap_px = (col2_left - col1_right) / _EMU
+    assert gap_px > 30, f"expected meaningful inter-column gap, got {gap_px:.0f}px"
+
+
+def test_clamp_upscales_y_too() -> None:
+    """Underscale path scales Y axis as well — otherwise tiny boxes get
+    tall thin look. Live run 29e189bb shapes were 194 px tall on a
+    520-px-tall safe area (37% — borderline). Verify height grows."""
+    shapes = [
+        _block(30, 37, top_px=140, height_px=40),
+        _block(90, 37, top_px=140, height_px=40),
+        _block(150, 37, top_px=140, height_px=40),
+    ]
+    original_h = shapes[0]["height_emu"]
+    _clamp_shapes_to_safe_area(shapes)
+    assert shapes[0]["height_emu"] > original_h, "Y axis should upscale too"
+
+
+def test_clamp_upscales_font_size_proportionally() -> None:
+    """Tiny boxes had 12pt text — after 10× upscale the text would be
+    swallowed by huge empty cards. Font should scale up too, capped at
+    24pt so labels don't take over."""
+    shapes = [_block(30, 37), _block(90, 37), _block(150, 37)]
+    # Add explicit font_size_pt
+    for s in shapes:
+        s["font_size_pt"] = 12
+    _clamp_shapes_to_safe_area(shapes)
+    # All sizes capped between 10 and 24.
+    for s in shapes:
+        assert 10 <= s["font_size_pt"] <= 24
+
+
+def test_clamp_does_not_upscale_when_above_threshold() -> None:
+    """A 3-block process at 300px each + 60px gaps = span 30..1020 = 990 px
+    on 1220 safe-area = 81% — well above 50% threshold. Must NOT touch."""
+    shapes = [
+        _block(30, 300),
+        _block(390, 300),
+        _block(750, 300),
+    ]
+    snapshot = [(s["left_emu"], s["width_emu"], s.get("font_size_pt", 12)) for s in shapes]
+    mutated = _clamp_shapes_to_safe_area(shapes)
+    assert mutated == 0
+    after = [(s["left_emu"], s["width_emu"], s.get("font_size_pt", 12)) for s in shapes]
+    assert after == snapshot

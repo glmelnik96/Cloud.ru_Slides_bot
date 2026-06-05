@@ -225,19 +225,32 @@ _SAFE_AREA_EMU = {
 }
 
 
-def _clamp_shapes_to_safe_area(shapes: list[dict[str, Any]]) -> int:
-    """Rescale a list of Agent 06 shape specs so they fit in the
-    horizontal safe-area. Returns count of shapes mutated.
+# If horizontal bounding span occupies less than this fraction of the
+# safe-area, treat as undersize (GLM-5.1 hallucination from 2026-06-05
+# run 29e189bb where 3 columns spanned 179 px on a 1220-px safe area —
+# 14.7% utilization). Anything below 50% is almost certainly a wrong-unit
+# emit; expand to fill.
+_UNDERSCALE_THRESHOLD = 0.50
+# When expanding, leave a small margin so corners breathe.
+_UPSCALE_TARGET_FRAC = 0.95
 
-    Strategy: find the leftmost left_emu and rightmost (left + width)
-    among rectangle-class shapes (rounded_rect / rectangle / circle /
-    arrow / line / text). If the bounding span exceeds the safe-area
-    width, compute a single ``scale = safe_width / span`` factor and a
-    horizontal shift so the leftmost shape sits at safe.left. Apply the
-    same affine transform to every shape's ``left_emu`` and
-    ``width_emu`` — vertical positions are kept (the prompt warns
-    against top/bottom overflow specifically; live overshoot was
-    horizontal only). Empty input → no-op.
+
+def _clamp_shapes_to_safe_area(shapes: list[dict[str, Any]]) -> int:
+    """Rescale a list of Agent 06 shape specs so they fit the safe-area
+    properly. Returns count of shapes mutated.
+
+    Two failure modes from live runs:
+      - **Overshoot** (run3.slide2, 2026-06-05): bounding span > safe
+        width → scale down + shift left.
+      - **Underscale** (run 29e189bb, 2026-06-05): bounding span <
+        50% of safe width → GLM hallucinated wrong-unit values; scale
+        up to ~95% of safe width and shift to safe.left.
+
+    Strategy: compute horizontal bounding span over rectangle-class
+    shapes. Decide overshoot vs underscale vs ok. Apply a single affine
+    transform (scale + shift) to every shape's ``left_emu``,
+    ``width_emu``. Underscale ALSO scales Y (top_emu / height_emu)
+    because the same hallucinated unit affects both axes.
 
     Mutates the spec dicts in place.
     """
@@ -261,20 +274,95 @@ def _clamp_shapes_to_safe_area(shapes: list[dict[str, Any]]) -> int:
     max_right = max(s[1] for s in spans)
     safe_left = _SAFE_AREA_EMU["left"]
     safe_right = _SAFE_AREA_EMU["right"]
+    safe_top = _SAFE_AREA_EMU["top"]
+    safe_bottom = _SAFE_AREA_EMU["bottom"]
     safe_w = safe_right - safe_left
+    safe_h = safe_bottom - safe_top
     current_w = max_right - min_left
-    # Already inside safe-area? Bail out (don't expand small process diagrams).
-    if min_left >= safe_left and max_right <= safe_right:
-        return 0
     if current_w <= 0 or safe_w <= 0:
         return 0
-    scale = min(1.0, safe_w / current_w)
-    # If only the start is off (e.g. starts at x=20 < safe_left=30) but
-    # everything fits within safe_w when shifted, just shift (scale=1.0).
-    # Otherwise scale down + shift to safe.left.
+
+    # ── classify mode ─────────────────────────────────────────────────
+    inside = (min_left >= safe_left and max_right <= safe_right)
+    overshoot = max_right > safe_right or min_left < safe_left
+    underscale = inside and (current_w < safe_w * _UNDERSCALE_THRESHOLD)
+    if not overshoot and not underscale:
+        return 0  # already well-placed
+
     mutated = 0
+    if underscale:
+        # GLM-5.1 hallucination: shapes are ~5-10x too small. Scale both
+        # axes by the same factor so circles stay circular, then shift to
+        # safe-top-left. Also scale font_size_pt proportionally so text
+        # doesn't dominate tiny boxes after upscale.
+        scale = (safe_w * _UPSCALE_TARGET_FRAC) / current_w
+        # Compute Y span across all shapes (use full list, including
+        # arrows whose width might be 0 if vertical).
+        ys = []
+        for spec in shapes:
+            if not isinstance(spec, dict):
+                continue
+            try:
+                t = int(spec.get("top_emu", 0) or 0)
+                h = int(spec.get("height_emu", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if h <= 0:
+                continue
+            ys.append((t, t + h, spec))
+        min_top = min((y[0] for y in ys), default=safe_top)
+        max_bot = max((y[1] for y in ys), default=safe_top)
+        current_h = max(1, max_bot - min_top)
+        # Cap Y scale so it doesn't overshoot safe-height.
+        scale_y = min(scale, (safe_h * _UPSCALE_TARGET_FRAC) / current_h)
+        for spec in shapes:
+            if not isinstance(spec, dict):
+                continue
+            try:
+                l = int(spec.get("left_emu", 0) or 0)
+                w = int(spec.get("width_emu", 0) or 0)
+                t = int(spec.get("top_emu", 0) or 0)
+                h = int(spec.get("height_emu", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            new_left = int(round(safe_left + (l - min_left) * scale))
+            new_width = max(1, int(round(w * scale))) if w > 0 else w
+            new_top = int(round(safe_top + (t - min_top) * scale_y))
+            new_height = max(1, int(round(h * scale_y))) if h > 0 else h
+            changed = False
+            if new_left != l:
+                spec["left_emu"] = new_left; changed = True
+            if new_width != w and w > 0:
+                spec["width_emu"] = new_width; changed = True
+            if new_top != t:
+                spec["top_emu"] = new_top; changed = True
+            if new_height != h and h > 0:
+                spec["height_emu"] = new_height; changed = True
+            # Scale text up proportionally too, but cap at 24pt.
+            try:
+                size_pt = float(spec.get("font_size_pt") or 0)
+            except (TypeError, ValueError):
+                size_pt = 0.0
+            if size_pt > 0:
+                # Use sqrt-ish scaling so text doesn't explode on 10x boxes.
+                new_size = min(24, max(10, int(round(size_pt * min(scale, 2.5)))))
+                if new_size != int(size_pt):
+                    spec["font_size_pt"] = new_size
+                    changed = True
+            if changed:
+                mutated += 1
+        if mutated:
+            print(
+                f"infographic upscale: span {current_w//_EMU_PER_PX}px → "
+                f"{int(current_w*scale)//_EMU_PER_PX}px (scale={scale:.2f}x, "
+                f"scale_y={scale_y:.2f}x), shapes mutated={mutated}",
+                file=sys.stderr,
+            )
+        return mutated
+
+    # ── overshoot path (legacy) ──────────────────────────────────────
+    scale = min(1.0, safe_w / current_w)
     for left_emu, right_emu, spec in spans:
-        # Map x ∈ [min_left, max_right] → x' ∈ [safe_left, safe_left+scale*current_w]
         new_left = int(round(safe_left + (left_emu - min_left) * scale))
         new_width = max(1, int(round((right_emu - left_emu) * scale)))
         if new_left != spec.get("left_emu") or new_width != spec.get("width_emu"):
@@ -283,7 +371,7 @@ def _clamp_shapes_to_safe_area(shapes: list[dict[str, Any]]) -> int:
             mutated += 1
     if mutated:
         print(
-            f"infographic clamp: span {(max_right - min_left)//_EMU_PER_PX}px "
+            f"infographic clamp: span {current_w//_EMU_PER_PX}px "
             f"→ safe-area {safe_w//_EMU_PER_PX}px (scale={scale:.3f}), "
             f"shapes mutated={mutated}",
             file=sys.stderr,
@@ -390,16 +478,20 @@ def clear_donor_body_slots(slide, donor_def: dict[str, Any] | None) -> int:
 # overlap "Хранение данных"). This is a more aggressive pass: clear *all*
 # non-title text on the slide, regardless of slot mapping.
 
-# Heuristic font-size threshold for "this is title-like" — donor titles are
-# typically 20pt+, body labels are 12-16pt. Conservative: keep anything 18pt+.
-_TITLE_FONT_PT_MIN = 18.0
-
-
+# B2 (2026-06-05): tightened. Live run a337cc86 slides 7/9 showed donor 33's
+# decoration sub-headers "Подзаголовок в две строки" bleeding through behind
+# infographic boxes even though clear_donor_non_title_text reported
+# non_title_cleared=6. Those sub-headers are 18-24pt — they sneaked past the
+# old `>= 18.0` threshold which treated them as titles.
+#
+# New rule: ONLY the slide TITLE placeholder is preserved. Every other text
+# shape (regardless of font size) gets cleared when infographic shapes are
+# about to be painted on top. The actual slide title is uniquely identified
+# by its placeholder type; donor decoration "sub-titles" are NOT placeholder
+# titles even if they look big.
 def _shape_is_title_like(shape) -> bool:
-    """Title detection independent of donor slot maps. Uses placeholder type
-    when available, otherwise the largest run font size. Mirrors the heuristic
-    in kpi_emphasis._shape_is_title_like but standalone (cyclic import-safe).
-    """
+    """True only for the slide's TITLE placeholder. Donor decoration shapes
+    with large fonts are NOT treated as titles — those caused live bleed."""
     try:
         ph = shape.placeholder_format
         if ph is not None:
@@ -409,21 +501,7 @@ def _shape_is_title_like(shape) -> bool:
                 return True
     except (ValueError, AttributeError):
         pass
-    if not getattr(shape, "has_text_frame", False):
-        return False
-    # Largest font on any run — title rows usually have big numbers.
-    max_pt = 0.0
-    try:
-        for p in shape.text_frame.paragraphs:
-            for r in p.runs:
-                try:
-                    if r.font.size is not None:
-                        max_pt = max(max_pt, float(r.font.size.pt))
-                except Exception:  # noqa: BLE001
-                    pass
-    except Exception:  # noqa: BLE001
-        return False
-    return max_pt >= _TITLE_FONT_PT_MIN
+    return False
 
 
 def clear_donor_non_title_text(slide) -> int:
