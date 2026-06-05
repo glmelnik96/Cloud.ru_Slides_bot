@@ -91,6 +91,36 @@ def _build_non_accent_colors():
 NON_ACCENT_COLORS = _build_non_accent_colors()
 
 
+def _green_ramp(n: int, accent_idx: int = -1) -> list:
+    """Return n RGBColors ramping dark→bright green; the accent bar gets the
+    brand green (#26D07C, brightest). Used by the editorial single-series path
+    where each bar is its own single-value series."""
+    if n <= 0:
+        return []
+    # Dark→bright endpoints (graphite-green → brand green).
+    lo = (0x0E, 0x5A, 0x38)
+    hi = (0x26, 0xD0, 0x7C)
+    out = []
+    for i in range(n):
+        t = i / max(n - 1, 1)
+        rgb = tuple(int(lo[c] + (hi[c] - lo[c]) * t) for c in range(3))
+        out.append(RGBColor(*rgb))
+    if 0 <= accent_idx < n:
+        out[accent_idx] = RGBColor(0x26, 0xD0, 0x7C)
+    return out
+
+
+def is_editorial_eligible(chart_config: dict) -> bool:
+    """Editorial path applies only to single-series bar charts marked
+    style='editorial'. Everything else keeps the clean uniform chart."""
+    if chart_config.get("style") != "editorial":
+        return False
+    if chart_config.get("type") != "bar":
+        return False
+    series = chart_config.get("series") or []
+    return len(series) == 1
+
+
 CHART_TYPE_MAP = {
     "area_stacked": XL_CHART_TYPE.AREA_STACKED,
     "area_100": XL_CHART_TYPE.AREA_STACKED_100,
@@ -154,11 +184,23 @@ def add_chart_to_slide(slide, chart_config, left, top, width, height, dark=False
     if ctype is None:
         raise ValueError(f"Unsupported chart type: {chart_config.get('type')}")
 
-    cd = CategoryChartData()
+    editorial = is_editorial_eligible(chart_config)
+    accent_idx = chart_config.get("accent_idx", -1)
 
+    cd = CategoryChartData()
     if ctype == XL_CHART_TYPE.PIE:
         cd.categories = [str(x) for x in chart_config["labels"]]
         cd.add_series("", chart_config["values"])
+    elif editorial:
+        # Split the single series into N single-value series so each bar
+        # carries its own colour (native charts have no per-point bar fill).
+        data = chart_config["series"][0]["data"]
+        cats = [str(x) for x in chart_config["x"]]
+        cd.categories = cats
+        for i, v in enumerate(data):
+            row = [None] * len(data)
+            row[i] = v
+            cd.add_series(cats[i], row)
     else:
         cd.categories = [str(x) for x in chart_config["x"]]
         for s in chart_config["series"]:
@@ -167,10 +209,7 @@ def add_chart_to_slide(slide, chart_config, left, top, width, height, dark=False
     chart_shape = slide.shapes.add_chart(ctype, left, top, width, height, cd)
     chart = chart_shape.chart
 
-    accent_idx = chart_config.get("accent_idx", -1)
-    if ctype != XL_CHART_TYPE.PIE:
-        _apply_series_colors(chart, accent_idx)
-    else:
+    if ctype == XL_CHART_TYPE.PIE:
         plot = chart.plots[0]
         for i, point in enumerate(plot.series[0].points):
             color = GREEN if i == accent_idx else NON_ACCENT_COLORS[
@@ -178,6 +217,21 @@ def add_chart_to_slide(slide, chart_config, left, top, width, height, dark=False
             ]
             point.format.fill.solid()
             point.format.fill.fore_color.rgb = color
+    elif editorial:
+        ramp = _green_ramp(len(list(chart.series)), accent_idx)
+        chart.has_legend = False
+        for i, s in enumerate(chart.series):
+            fill = s.format.fill
+            fill.solid()
+            fill.fore_color.rgb = ramp[i]
+            s.format.line.fill.background()
+        try:
+            chart.plots[0].gap_width = 60
+            chart.plots[0].overlap = 100  # bars share the category slot
+        except Exception:
+            pass
+    else:
+        _apply_series_colors(chart, accent_idx)
 
     text_color = WHITE if dark else GRAPHITE
 
@@ -188,7 +242,7 @@ def add_chart_to_slide(slide, chart_config, left, top, width, height, dark=False
     else:
         chart.has_title = False
 
-    if ctype != XL_CHART_TYPE.PIE:
+    if ctype != XL_CHART_TYPE.PIE and not editorial:
         chart.has_legend = True
         chart.legend.position = XL_LEGEND_POSITION.TOP
         chart.legend.include_in_layout = False
@@ -227,6 +281,9 @@ def render_chart_pptx_slide(slide, chart_config, dark=False):
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
     from pptx.enum.shapes import MSO_SHAPE
 
+    editorial = is_editorial_eligible(chart_config)
+    if editorial:
+        dark = True
     text_color = WHITE if dark else GRAPHITE
 
     # Title — в штатный placeholder шаблона, единый стиль (Problem #6)
@@ -234,7 +291,10 @@ def render_chart_pptx_slide(slide, chart_config, dark=False):
     if title_text:
         set_slide_title(slide, title_text, dark=dark)
 
-    ZONE_X, ZONE_Y, ZONE_W, ZONE_H = 60, 120, 1160, 480
+    if editorial:
+        ZONE_X, ZONE_Y, ZONE_W, ZONE_H = 60, 150, 760, 450  # leave right gutter
+    else:
+        ZONE_X, ZONE_Y, ZONE_W, ZONE_H = 60, 120, 1160, 480
     chart_inner_cfg = {k: v for k, v in chart_config.items()
                        if k not in ("title", "slide_title", "caption")}
 
@@ -244,6 +304,15 @@ def render_chart_pptx_slide(slide, chart_config, dark=False):
         Emu(ZONE_W * 9525), Emu(ZONE_H * 9525),
         dark=dark,
     )
+
+    if editorial:
+        # Large white выноска (peak value) to the right of the plot.
+        data = chart_config["series"][0]["data"]
+        acc = chart_config.get("accent_idx", -1)
+        peak = data[acc] if 0 <= acc < len(data) else max(data)
+        _add_text_box(slide, ZONE_X + ZONE_W + 20, 180, 380, 360,
+                      str(peak), font_size_pt=150, bold=True, color=WHITE,
+                      align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
 
     caption = chart_config.get("caption", "")
     if caption:
