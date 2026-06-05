@@ -306,13 +306,19 @@ def render_chart_pptx_slide(slide, chart_config, dark=False):
     )
 
     if editorial:
-        # Large white выноска (peak value) to the right of the plot.
+        # Large white выноска (peak value) to the right of the plot. Size the
+        # font by length and disable wrap so multi-digit/decimal peaks like
+        # "13.4" stay on one line instead of breaking (live deck_a.s5).
         data = chart_config["series"][0]["data"]
         acc = chart_config.get("accent_idx", -1)
         peak = data[acc] if 0 <= acc < len(data) else max(data)
-        _add_text_box(slide, ZONE_X + ZONE_W + 20, 180, 380, 360,
-                      str(peak), font_size_pt=150, bold=True, color=WHITE,
+        peak_s = str(peak)
+        call_w = 1245 - (ZONE_X + ZONE_W + 20)  # use the full right gutter
+        peak_font = 150 if len(peak_s) <= 3 else (115 if len(peak_s) <= 4 else 92)
+        call_box = _add_text_box(slide, ZONE_X + ZONE_W + 20, 180, call_w, 360,
+                      peak_s, font_size_pt=peak_font, bold=True, color=WHITE,
                       align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
+        call_box.text_frame.word_wrap = False
 
     caption = chart_config.get("caption", "")
     if caption:

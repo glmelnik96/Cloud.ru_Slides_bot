@@ -318,17 +318,28 @@ def render_kpi(slide, kpi_config, dark=False):
                     file=sys.stderr,
                 )
 
-        # Number box: left-aligned, width sized to the value (~0.62×font per digit).
-        num_w = max(120, int(len(str(value)) * NUMBER_FONT * 0.62) + 40)
-        num_w = min(num_w, w - 120)  # always leave ≥120px for the description
-        _add_text_box(slide, x, ROW_TOP, num_w, ROW_HEIGHT,
-                      value, font_size_pt=NUMBER_FONT, bold=False, color=color,
+        # Number box: left-aligned, width sized to the value (~0.62×font per
+        # digit). Shrink the font so the value always fits on ONE line within
+        # the column (≥120px reserved for the description), then disable wrap —
+        # otherwise long values like "99.97" break to 2 lines (live deck_a.s7).
+        DESC_MIN = 120
+        avail_num_w = max(160, w - DESC_MIN)
+        nchars = max(1, len(str(value)))
+        nf = NUMBER_FONT
+        nat_w = int(nchars * nf * 0.62) + 40
+        if nat_w > avail_num_w:
+            nf = max(40, int((avail_num_w - 40) / (nchars * 0.62)))
+            nat_w = int(nchars * nf * 0.62) + 40
+        num_w = min(max(120, nat_w), avail_num_w)
+        num_box = _add_text_box(slide, x, ROW_TOP, num_w, ROW_HEIGHT,
+                      value, font_size_pt=nf, bold=False, color=color,
                       align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
+        num_box.text_frame.word_wrap = False
 
         # Enlarged %: ≈0.5× number height, kerned to the number's top-right.
         if has_pct:
-            pct_size = max(80, NUMBER_FONT // 2)
-            pct_x = x + num_w - 24
+            pct_size = max(40, int(nf * 0.55))
+            pct_x = x + num_w - 16
             pct_y = ROW_TOP + 10
             _add_text_box(slide, pct_x, pct_y, 90, 120, "%",
                           font_size_pt=pct_size, bold=True, color=color,
