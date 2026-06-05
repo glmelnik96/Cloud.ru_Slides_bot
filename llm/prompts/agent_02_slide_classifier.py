@@ -28,10 +28,10 @@ SYSTEM = f"""\
       slide_type: "kpi_native"|"chart_pptx_native"|"table_native"|"flow_diagram_native"|"image_native"|null,
       dark: boolean,                    // тёмная подложка слайда
       kpi: {{title: string, numbers: [{{value: string, desc: string, pct: boolean, accent: boolean}}]}} | null,
-      chart: {{type: "area_stacked"|"area_100"|"bar"|"bar_stacked"|"line"|"pie", title: string, caption: string, x: any[], series: [{{name: string, data: number[]}}], accent_idx: number}} | null,
+      chart: {{type: "area_stacked"|"area_100"|"bar"|"bar_stacked"|"line"|"pie", style: "editorial"|null, title: string, caption: string, x: any[], series: [{{name: string, data: number[]}}], accent_idx: number}} | null,
       table: {{header: string, subtitle: string, style: "zebra", headers: string[], data: string[][], first_col_wider: boolean}} | null,
       flow: {{header: string, subtitle: string, preset: "card_grid"|"numbered_columns"|"numbered_rows"|"hero_statement"|null, cards: [{{title: string, text: string}}], columns: [{{title: string, text: string, number: string}}], rows: [{{title: string, text: string}}], statement: string, support: string, grid: boolean, cols: number|null, blocks: object[], arrows: object[]}} | null,
-      image: {{title: string, image_path: string, caption: string}} | null,
+      image: {{title: string, image_path: string, caption: string, subcategory: string, frame: "browser"|null}} | null,
       _source_slide: number|null,        // если slide родился от split — номер исходного
       _split_part: string|null           // "1/2", "2/2"
     }}
@@ -51,7 +51,7 @@ SYSTEM = f"""\
 - data (1 KPI) → callout
 - data (2–3 KPI) → multicolumn + slide_type=kpi_native
 - image (>50% фото) → image (subcategory_hint: "photo_full"/"photo_half"/"illustration_half")
-- image (UI/скриншот) → image (subcategory_hint: "screenshot_bg_1"/"_2"/"_3")
+- image (UI/скриншот) → image (subcategory_hint: "screenshot_bg_1"/"_2"/"_3"), проставь image.frame="browser" (рендер добавит бренд-хром: зелёная title-плашка + рамка окна, эталон slide 73). Обычное фото/иллюстрация → frame=null.
 - schema → flow_diagram_native (slide_type) + category=other
 - chart → chart_pptx_native (slide_type, ВСЕГДА editable PPTX, не PNG) + category=other
 - table → table_native + category=table
@@ -59,6 +59,7 @@ SYSTEM = f"""\
 ПРАВИЛО ВЫБОРА NATIVE RENDER (триггеры):
 - 1–3 KPI чисел → slide_type=kpi_native, заполни kpi{{}}
 - Серии данных с осью → chart_pptx_native (НЕ chart_native — chart должен быть редактируемым)
+- chart.style="editorial" ТОЛЬКО для ОДНОСЕРИЙНОГО bar-чарта-«героя» роста/импакта (одна метрика по годам/категориям, есть пиковое значение): рендерится на тёмном слайде с градиентом зелёных столбцов и крупной белой выноской → поставь dark=true. accent_idx = индекс пикового/ключевого столбца. Многосерийные и не-bar чарты → style=null (чистый светлый чарт).
 - Регулярная таблица ≥3×3 без объединённых ячеек → table_native (style="zebra", first_col_wider=true по умолчанию)
 - Схема/процесс с блоками+стрелками → flow_diagram_native (grid=true когда блоки укладываются в равные колонки)
 - Иначе category-only (slide_type=null) — пойдёт через donor.
