@@ -101,19 +101,30 @@ def _set_textframe(tf, text: str, font: str | None, size_pt: Any,
         run.font.bold = True
 
 
-def _add_rounded_rect(slide, spec: dict[str, Any]) -> None:
+def _emu_bounds(spec: dict[str, Any]) -> tuple[Emu, Emu, Emu, Emu]:
     left = Emu(int(spec.get("left_emu", 0) or 0))
     top = Emu(int(spec.get("top_emu", 0) or 0))
     width = Emu(int(spec.get("width_emu", 0) or 0))
     height = Emu(int(spec.get("height_emu", 0) or 0))
-    shape = slide.shapes.add_shape(
-        MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height
-    )
-    # Conservative adjust (default ~0.16 looks too aggressive on small boxes).
-    try:
-        shape.adjustments[0] = 0.10
-    except Exception:
-        pass
+    return left, top, width, height
+
+
+def _add_filled_shape(slide, spec: dict[str, Any], mso_shape: int,
+                     *, rounded_adjust: float | None = None) -> None:
+    """Generic add-shape with fill/line/text dispatch.
+
+    Used by rectangle / rounded_rect / circle / arrow — they share the
+    same fill+line+optional-text contract; only the MSO_SHAPE constant
+    differs. ``rounded_adjust`` overrides the default corner-radius
+    fraction (rounded_rect only).
+    """
+    left, top, width, height = _emu_bounds(spec)
+    shape = slide.shapes.add_shape(mso_shape, left, top, width, height)
+    if rounded_adjust is not None:
+        try:
+            shape.adjustments[0] = rounded_adjust
+        except Exception:  # noqa: BLE001
+            pass
     _apply_fill(shape, spec.get("fill_color"))
     _apply_line(shape, spec.get("stroke_color"), spec.get("stroke_width_pt"))
     text = spec.get("text") or ""
@@ -125,12 +136,48 @@ def _add_rounded_rect(slide, spec: dict[str, Any]) -> None:
             color_hex=spec.get("font_color"),
             bold=False,
         )
-        # Tight padding so text fits inside the rect.
         tf = shape.text_frame
         tf.margin_left = Emu(60000)
         tf.margin_right = Emu(60000)
         tf.margin_top = Emu(20000)
         tf.margin_bottom = Emu(20000)
+
+
+def _add_rounded_rect(slide, spec: dict[str, Any]) -> None:
+    _add_filled_shape(slide, spec, MSO_SHAPE.ROUNDED_RECTANGLE,
+                     rounded_adjust=0.10)
+
+
+def _add_rectangle(slide, spec: dict[str, Any]) -> None:
+    _add_filled_shape(slide, spec, MSO_SHAPE.RECTANGLE)
+
+
+def _add_circle(slide, spec: dict[str, Any]) -> None:
+    _add_filled_shape(slide, spec, MSO_SHAPE.OVAL)
+
+
+def _add_arrow(slide, spec: dict[str, Any]) -> None:
+    """Default to RIGHT_ARROW (process flow l→r). Agent 06 doesn't specify
+    direction, but its `process` infographic_type uses horizontal step
+    layouts where arrows go left→right between boxes."""
+    _add_filled_shape(slide, spec, MSO_SHAPE.RIGHT_ARROW)
+
+
+def _add_line(slide, spec: dict[str, Any]) -> None:
+    """Render as a thin rectangle (height = stroke_width). python-pptx
+    Connector API is brittle for absolute positions in this codebase,
+    and Agent 06 emits line shapes with full bounding boxes anyway."""
+    left, top, width, height = _emu_bounds(spec)
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+    # Lines have no fill — colour comes from stroke_color (use as fill).
+    stroke_hex = spec.get("stroke_color") or spec.get("fill_color")
+    color = _parse_hex(stroke_hex)
+    if color is not None:
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = color
+    else:
+        shape.fill.background()
+    shape.line.fill.background()
 
 
 def _add_textbox(slide, spec: dict[str, Any]) -> None:
@@ -152,7 +199,11 @@ def _add_textbox(slide, spec: dict[str, Any]) -> None:
 
 _HANDLERS = {
     "rounded_rect": _add_rounded_rect,
-    "text": _add_textbox,
+    "rectangle":    _add_rectangle,
+    "circle":       _add_circle,
+    "arrow":        _add_arrow,
+    "line":         _add_line,
+    "text":         _add_textbox,
 }
 
 

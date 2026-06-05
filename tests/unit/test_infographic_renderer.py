@@ -81,6 +81,24 @@ def test_render_textbox_adds_shape(blank_slide) -> None:
     assert "275 контактов" in blank_slide.shapes[-1].text_frame.text
 
 
+@pytest.mark.parametrize("kind", ["rectangle", "circle", "arrow", "line"])
+def test_render_additional_shape_types(blank_slide, kind: str) -> None:
+    """T2.5: rectangle / circle / arrow / line — added 2026-06-05 after
+    live run dropped 3/15 arrow shapes from a process infographic."""
+    before = len(blank_slide.shapes)
+    added = render_infographic_shapes(blank_slide, [{
+        "type": kind,
+        "left_emu": 100000, "top_emu": 100000,
+        "width_emu": 800000, "height_emu": 200000,
+        "fill_color": "#26D07C" if kind != "line" else "none",
+        "stroke_color": "#222222",
+        "stroke_width_pt": 1.0,
+        "text": "",
+    }])
+    assert added == 1, f"{kind} should be added"
+    assert len(blank_slide.shapes) == before + 1
+
+
 def test_render_skips_unknown_type(blank_slide) -> None:
     before = len(blank_slide.shapes)
     added = render_infographic_shapes(blank_slide, [
