@@ -240,36 +240,31 @@ def render_kpi(slide, kpi_config, dark=False):
     if title:
         set_slide_title(slide, title, dark=dark)
 
-    # Number boxes layout
+    # D3 (2026-06-06): inline layout — number LEFT, description RIGHT, vertically
+    # centered (template slide 43). Color stays graphite (canon 2026-05-29).
     if n == 1:
-        x_positions = [440]
-        block_width = 400
+        col_x = [60]
+        col_w = [1160]
     elif n == 2:
-        x_positions = [140, 740]
-        block_width = 400
+        col_x = [60, 660]
+        col_w = [560, 560]
     else:  # n == 3
-        x_positions = [35, 440, 845]
-        block_width = 400
+        col_x = [40, 440, 840]
+        col_w = [380, 380, 380]
 
-    NUMBER_TOP = 200
-    NUMBER_HEIGHT = 260
-    DESC_TOP = 470
-    DESC_HEIGHT = 120
-    NUMBER_FONT = 130 if n >= 2 else 199  # single hero number может быть 199pt
-
-    # Reduce font for 3 numbers if they are wide
+    ROW_TOP = 240
+    ROW_HEIGHT = 240
+    NUMBER_FONT = 150 if n == 1 else (110 if n == 2 else 90)
     if n == 3:
-        max_chars = max(len(x["value"]) for x in kpi_config["numbers"])
+        max_chars = max(len(str(x["value"])) for x in kpi_config["numbers"])
         if max_chars > 3:
-            NUMBER_FONT = 100  # 4+ digits — smaller
+            NUMBER_FONT = 76
+    DESC_FONT = 16 if n == 1 else (14 if n == 2 else 12)
 
     for i, num in enumerate(kpi_config["numbers"]):
-        x = x_positions[i]
-        is_accent = num.get("accent", False)
-        # Canonical 2026-05-29 (Problem #2): цифра ВСЕГДА #222222 (светлый) /
-        # белая (тёмный) — НЕ зелёная. Акцент главного показателя выносится в
-        # отдельную зелёную плашку-подчёркивание под цифрой (см. ниже).
-        color = text_color
+        x = col_x[i]
+        w = col_w[i]
+        color = text_color  # graphite/white — never the accent itself
         value = num["value"]
         has_pct = num.get("pct", False)
 
@@ -281,45 +276,47 @@ def render_kpi(slide, kpi_config, dark=False):
             value = value.rstrip()[:-1].rstrip()
             has_pct = True
 
-        # Canonical §4: 199pt frame ⇒ max 2 значащих цифры. Иначе overflow.
-        # Применяем только к hero (199pt single number); для 130/100pt запас больше.
-        if NUMBER_FONT >= 199:
+        # Canonical §4: крупный hero-frame ⇒ max 2 значащих цифры, иначе overflow.
+        if NUMBER_FONT >= 150:
             digits = _count_significant_digits(value)
             if digits > KPI_HERO_DIGIT_LIMIT:
                 print(
                     f"WARN: KPI value '{value}' содержит {digits} значащих цифр "
-                    f"при 199pt frame (canonical max {KPI_HERO_DIGIT_LIMIT}). "
-                    f"Используй сокращение ('1.5K', '~{value[:2]}') или сменить layout (donor 47).",
+                    f"при {NUMBER_FONT}pt frame (canonical max {KPI_HERO_DIGIT_LIMIT}).",
                     file=sys.stderr,
                 )
 
-        # Number text box
-        _add_text_box(slide, x, NUMBER_TOP, block_width, NUMBER_HEIGHT,
+        # Number box: left-aligned, width sized to the value (~0.62×font per digit).
+        num_w = max(120, int(len(str(value)) * NUMBER_FONT * 0.62) + 40)
+        num_w = min(num_w, w - 120)  # always leave ≥120px for the description
+        _add_text_box(slide, x, ROW_TOP, num_w, ROW_HEIGHT,
                       value, font_size_pt=NUMBER_FONT, bold=False, color=color,
-                      align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+                      align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
 
-        # Accent: тонкая зелёная полоса-маркер над цифрой УБРАНА — как акцент она
-        # СЛАБА (user 2026-06-02: «зелёный маркер недостаточен для акцента, так не
-        # делай никогда»). Сильный акцент = СУБСТАНЦИОНАЛЬНАЯ зелёная заливка-блок
-        # (графитовая цифра на зелёном) или композиция, а не тонкая черта.
-        # Замена-механизм согласуется отдельно (см. ответ к user 2026-06-02).
-        _ = is_accent
-
-        # Optional % sign — small, top-right corner of number box
+        # Enlarged %: ≈0.5× number height, kerned to the number's top-right.
         if has_pct:
-            pct_size = max(40, NUMBER_FONT // 3)  # % about 1/3 of number
-            pct_x = x + block_width - 70
-            pct_y = NUMBER_TOP + 20
-            _add_text_box(slide, pct_x, pct_y, 60, 80, "%",
+            pct_size = max(80, NUMBER_FONT // 2)
+            pct_x = x + num_w - 24
+            pct_y = ROW_TOP + 10
+            _add_text_box(slide, pct_x, pct_y, 90, 120, "%",
                           font_size_pt=pct_size, bold=True, color=color,
                           align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP)
 
-        # Description below
+        # Green underline-plate accent under the number (canon: accent is the
+        # plate, not a green number).
+        if num.get("accent", False):
+            _add_accent_bar(slide, x, ROW_TOP + ROW_HEIGHT - 8,
+                            num_w, 8, color=GREEN)
+
+        # Description: to the RIGHT of the number, vertically centered to it.
         desc = num.get("desc", "")
         if desc:
-            _add_text_box(slide, x, DESC_TOP, block_width, DESC_HEIGHT,
-                          desc, font_size_pt=16, bold=False, color=text_color,
-                          align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.TOP)
+            desc_x = x + num_w + 16
+            desc_w = x + w - desc_x
+            _add_text_box(slide, desc_x, ROW_TOP, max(80, desc_w), ROW_HEIGHT,
+                          desc, font_size_pt=DESC_FONT, bold=False,
+                          color=text_color,
+                          align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.MIDDLE)
 
 
 # Constants for blank donor selection.
