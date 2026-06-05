@@ -47,12 +47,14 @@ donors:
 
   4:
     category: title_white_compact
-    description: "Белый компактный титул с местом для подзаголовка/спикера"
+    description: "Белый компактный титул с местом для подзаголовка/спикера. ВНИМАНИЕ: layout содержит 4 декоративных овала справа (T=4.34\" L=6.98/8.56/10.15/11.73\") — они видны если не заполняются KPI/иконки."
     slots:
       title:    { shape_idx: 1, size_pt: 60, max_chars: 80, safe_max_chars: 55, canonical_color: "#222222" }
       subtitle: { shape_idx: 0, size_pt: 20, max_chars: 100, safe_max_chars: 70, canonical_color: "#222222" }
-    use_when: "Заголовок 30-55 символов (комфортная зона). 56-80 — overflow risk"
-    composition: "title.top_px ≈ 60 (комфортный padding)"
+    use_when: "30-55 chars ТОЛЬКО если есть 4 KPI/иконки — иначе layout-овалы пустые, бери 6"
+    avoid_when: "Plain title без KPI/icons — 4 пустых овала справа выглядят как 'незаполненные KPI слоты' (live verifier complaint 2026-06-05 score=22 на slide 1). Для plain title бери donor 6 (тёмный) или вместо титула донор 28 (col1+col2) с заголовком в title-зоне."
+    composition: "title.top_px ≈ 60 (комфортный padding). Декоративные овалы — layout-inherited, build_v9 не может их удалить per-slide."
+    notes: "v0.15 (2026-06-05): задокументирована проблема с 4 декоративными овалами в layout — они видны на пустой правой половине слайда. Layout designer должен учитывать avoid_when."
 
   5:
     category: title_white_with_3d

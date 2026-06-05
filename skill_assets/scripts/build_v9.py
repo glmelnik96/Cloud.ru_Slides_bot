@@ -62,6 +62,15 @@ try:
 except ImportError:
     TABLE_RENDERER_AVAILABLE = False
 
+try:
+    from infographic_renderer import (
+        render_infographic_shapes,
+        clear_donor_body_slots,
+    )
+    INFOGRAPHIC_RENDERER_AVAILABLE = True
+except ImportError:
+    INFOGRAPHIC_RENDERER_AVAILABLE = False
+
 EMU_PER_PX = 9525
 
 
@@ -328,6 +337,30 @@ def build(plan_path, template_path, output_path, donor_map_path):
                 if tf is not None:
                     clear_text_frame(tf)
 
+        # INFOGRAPHIC native_block (Agent 06): инжектим shape-список (rounded_rect+text)
+        # с абсолютным позиционированием поверх клона донора. Когда инфографика
+        # есть, body-слоты донора чистим — иначе старый шаблонный текст
+        # «просвечивает» между блоками сравнения. Title остаётся (он не
+        # дублируется в shape-списке инфографикa).
+        info_block = plan_slide.get("infographic") or {}
+        info_shapes = info_block.get("shapes") or []
+        if info_shapes and INFOGRAPHIC_RENDERER_AVAILABLE:
+            try:
+                cleared = clear_donor_body_slots(actual, donor_def) if donor_def else 0
+                added = render_infographic_shapes(actual, info_shapes)
+                if added or cleared:
+                    print(
+                        f"infographic: slide donor={src_num} type={info_block.get('type')} "
+                        f"shapes_added={added}/{len(info_shapes)} donor_slots_cleared={cleared}",
+                        file=sys.stderr,
+                    )
+            except Exception as e:  # noqa: BLE001 — never fail the build
+                print(f"WARN: infographic render failed (donor {src_num}): {e}",
+                      file=sys.stderr)
+        elif info_shapes and not INFOGRAPHIC_RENDERER_AVAILABLE:
+            print("WARN: infographic shapes present but infographic_renderer "
+                  "module unavailable — skipping", file=sys.stderr)
+
         # PICTURES (вставляются ПОВЕРХ donor shapes)
         for pic in plan_slide.get("pictures", []):
             file_path = pic.get("file")
@@ -416,6 +449,18 @@ def build(plan_path, template_path, output_path, donor_map_path):
             print(f"enforce_canonical: {enf_total}", file=sys.stderr)
     except Exception as e:
         print(f"WARN: enforce_canonical pass skipped: {e}", file=sys.stderr)
+
+    # === FINAL: KPI emphasis (T2.2) ===
+    # Detect digit-heavy runs in body text and bold+green them so 12pt
+    # numbers buried in body actually catch the eye. Skips kpi_native
+    # slides (render_kpi already styled them) and title-like runs.
+    try:
+        from kpi_emphasis import apply_kpi_emphasis
+        emph_stats = apply_kpi_emphasis(p, plan_slides=plan["slides"])
+        if emph_stats["total"]:
+            print(f"kpi_emphasis: {emph_stats}", file=sys.stderr)
+    except Exception as e:
+        print(f"WARN: kpi_emphasis pass skipped: {e}", file=sys.stderr)
 
     p.save(output_path)
     print(f"Saved {output_path}: {len(p.slides)} slides, {pictures_inserted} pictures inserted",

@@ -532,17 +532,42 @@ def issue_breakdown(arts: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+_AUTOFIX_SCORE_FLOOR = 60
+"""Verdict scores >= this number are considered shippable as-is — autofix
+risks regressing other slides for marginal gain. Empirical: 2026-06-05 run
+went from score=61 (after first build) to 43 after autofix retry, because
+COPY_EDITOR touches every slide and breaks aesthetic balance on those
+that weren't the target."""
+
+
 def autofix_can_help(arts: dict[str, Any]) -> bool:
-    """True iff the verdict has at least one issue COPY_EDITOR can address.
+    """True iff autofix retry is likely to improve the verdict.
 
     COPY_EDITOR fixes ``text_overflow`` (shorten) and ``semantics``
     (rephrase to match topic). ``text_replaced`` (placeholder leak — build
-    bug) and ``aesthetic`` (needs INFOGRAPHIC_MAKER) are out of scope, so
-    triggering a retry for them just burns Cloud.ru budget without
-    improving the verdict (2026-06-04 live run regressed 11→13 warnings).
+    bug) and ``aesthetic`` (needs INFOGRAPHIC_MAKER) are out of scope.
+
+    Three gates compose (all must pass to enter autofix):
+      1. score < _AUTOFIX_SCORE_FLOOR — verdict is bad enough that the
+         risk of regressing other slides is worth taking.
+      2. at least one fixable category (text_overflow + semantics > 0).
+      3. fixable categories are not dominated by unfixable ones — if
+         aesthetic/text_replaced/other outnumber fixable 2:1, the
+         feedback list is mostly noise to COPY_EDITOR and the retry
+         tends to over-edit (2026-06-05 run regressed 11→13 warnings).
     """
+    ver = arts.get("verifier_verdict") or {}
+    score = int(ver.get("score_avg") or 0)
+    if score >= _AUTOFIX_SCORE_FLOOR:
+        return False
     b = issue_breakdown(arts)
-    return (b["text_overflow"] + b["semantics"]) > 0
+    fixable = b["text_overflow"] + b["semantics"]
+    if fixable == 0:
+        return False
+    unfixable = b["text_replaced"] + b["aesthetic"] + b["other"]
+    if unfixable > 2 * fixable:
+        return False
+    return True
 
 
 def _collect_verifier_feedback(arts: dict[str, Any]) -> list[str]:

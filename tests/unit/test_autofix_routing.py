@@ -36,10 +36,13 @@ def test_categorize_issue(line: str, expected: str) -> None:
     assert _categorize_issue(line) == expected
 
 
-def _make_arts(blockers: list[str], warnings: list[str] | None = None) -> dict:
+def _make_arts(blockers: list[str], warnings: list[str] | None = None,
+               score: int = 30) -> dict:
+    """Score defaults to 30 so the floor gate (60) doesn't block by default."""
     return {"verifier_verdict": {
         "blockers": blockers,
         "warnings": warnings or [],
+        "score_avg": score,
     }}
 
 
@@ -94,6 +97,43 @@ def test_autofix_skips_when_only_aesthetic_warnings() -> None:
 
 def test_autofix_skips_when_no_issues() -> None:
     arts = _make_arts(blockers=[], warnings=[])
+    assert autofix_can_help(arts) is False
+
+
+def test_autofix_skips_when_score_above_floor() -> None:
+    """Live-run regression: score=61 + 2 text_overflow → autofix ran and
+    dropped score to 43. Floor=60 stops this from happening again."""
+    arts = _make_arts(
+        blockers=["slide 4: chars > max 200 overflow",
+                  "slide 5: chars > max 200 overflow"],
+        score=61,
+    )
+    assert autofix_can_help(arts) is False
+
+
+def test_autofix_runs_when_score_below_floor_and_fixable() -> None:
+    arts = _make_arts(
+        blockers=["slide 4: chars > max 200 overflow"],
+        score=45,
+    )
+    assert autofix_can_help(arts) is True
+
+
+def test_autofix_skips_when_unfixable_dominates() -> None:
+    """1 fixable + 5 unfixable (5 > 2*1) → don't waste retry."""
+    arts = _make_arts(
+        blockers=[
+            "slide 4: chars > max 200 overflow",          # fixable (1)
+            "slide 7: text_replaced placeholder",          # unfixable
+            "slide 8: text_replaced placeholder",          # unfixable
+        ],
+        warnings=[
+            "slide 5: hierarchy",                          # unfixable
+            "slide 2: philosophy",                         # unfixable
+            "slide 1: function — стена текста",            # unfixable
+        ],
+        score=40,
+    )
     assert autofix_can_help(arts) is False
 
 

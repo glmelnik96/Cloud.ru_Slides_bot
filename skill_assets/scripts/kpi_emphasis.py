@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""
+kpi_emphasis.py — финальный детерминистский пас: подсветка ключевых цифр.
+
+Зачем: visual_verifier повторяет (2026-06-05 ран) что цифры в body-тексте
+не выделены типографикой/цветом — «Ключевые цифры (275, 568 125 090)»,
+«1,2 млн, 14,2 млн, 25 млн», «101 млн/мес, 100 млн разово». Классификатор
+не промоутит multi-number бизнес-слайды в kpi_native (там бывает >3 числа
++ контекст), поэтому числа уходят 12pt regular в body — глаз их не ловит.
+
+Этот пас находит число-токены В РАМКАХ runs body-плейсхолдеров и
+разбивает run так, чтобы число стало bold + GREEN (#26D07C). Не трогает:
+- title-плейсхолдеры (size_pt >= 28)
+- табличные ячейки (table_renderer уже стилизует)
+- runs, у которых size_pt не известен (могут быть из шаблонной графики)
+- слайды с slide_type=kpi_native (там уже стилизовано render_kpi)
+
+Безопасно для всех донорских лейаутов: работает на XML-уровне через lxml,
+сохраняя оригинальный rPr через deepcopy.
+"""
+from __future__ import annotations
+
+import re
+import sys
+from copy import deepcopy
+from typing import Any
+
+from lxml import etree
+from pptx.oxml.ns import qn
+
+
+# Cloud.ru brand green (canonical accent).
+_GREEN_HEX = "26D07C"
+
+# Размер шрифта в hundredths of points; >= 2800 = >= 28pt — это заголовки,
+# их не трогаем.
+_TITLE_FONT_THRESHOLD_HPT = 2800
+
+# Юнит-суффиксы, делающие число «значимым» даже если оно короткое.
+_UNIT_PATTERN = (
+    r"(?:млн|млрд|тыс|руб|долл|евро|usd|eur|rub|%|‰|\$|€|"
+    r"раз[а-я]*|шт[а-я]*|чел[а-я]*|сек[а-я]*|мин[а-я]*|"
+    r"мес[а-я]*|год[а-я]*|кв\.?|ед[а-я]*|"
+    r"кг|мг|г|км|мм|см|м|тб|гб|мб)"
+)
+
+# Число: 1-3 цифры, опц. группы по 3 через пробел/неразр.пробел/запятую,
+# опц. десятичная часть (",5" или ".5"), опц. юнит.
+# Должно начинаться с границы (не внутри слова) и опц. иметь юнит/символ.
+_NUMBER_RE = re.compile(
+    r"(?<![\w])"                                   # не внутри слова/числа
+    r"(?P<num>\d{1,3}(?:[ \u00a0\u202f]\d{3})*"
+    r"(?:[.,]\d+)?"                                # десятичная
+    r"|\d+(?:[.,]\d+)?)"                           # либо просто цифры
+    r"(?:\s*(?P<unit>" + _UNIT_PATTERN + r"))?"
+    r"(?![\w])",
+    re.IGNORECASE,
+)
+
+
+def _qualifies(num: str, unit: str | None) -> bool:
+    """Token достоин подсветки, если есть юнит ИЛИ >=3 цифр."""
+    if unit:
+        return True
+    digits = sum(1 for c in num if c.isdigit())
+    return digits >= 3
+
+
+def _set_run_emphasis(rPr: etree._Element) -> None:
+    """Мутирует <a:rPr>: b='1', color=#26D07C."""
+    rPr.set("b", "1")
+    # Удаляем существующий solidFill (если был), вставляем новый GREEN.
+    for sf in rPr.findall(qn("a:solidFill")):
+        rPr.remove(sf)
+    solid = etree.SubElement(rPr, qn("a:solidFill"))
+    srgb = etree.SubElement(solid, qn("a:srgbClr"))
+    srgb.set("val", _GREEN_HEX)
+
+
+def _emphasize_paragraph(p_el: etree._Element) -> int:
+    """Разбивает runs параграфа по KPI-токенам, делает их bold+green.
+
+    Возвращает количество подсвеченных токенов.
+    """
+    runs = p_el.findall(qn("a:r"))
+    if not runs:
+        return 0
+    emphasized = 0
+    for r in list(runs):
+        t_el = r.find(qn("a:t"))
+        if t_el is None or not t_el.text:
+            continue
+        text = t_el.text
+
+        # Skip headings — большой шрифт исключаем.
+        rPr = r.find(qn("a:rPr"))
+        if rPr is not None:
+            sz = rPr.get("sz")
+            if sz and sz.isdigit() and int(sz) >= _TITLE_FONT_THRESHOLD_HPT:
+                continue
+
+        matches = [m for m in _NUMBER_RE.finditer(text)
+                   if _qualifies(m.group("num"), m.group("unit"))]
+        if not matches:
+            continue
+
+        # Build replacement run sequence: [pre, kpi, mid, kpi, post, ...]
+        parent = r.getparent()
+        insert_idx = list(parent).index(r)
+
+        cursor = 0
+        new_runs: list[etree._Element] = []
+        for m in matches:
+            start = m.start()
+            end = m.end()
+            # Тeкст до — копия r с обычным rPr.
+            if start > cursor:
+                pre = deepcopy(r)
+                pre_t = pre.find(qn("a:t"))
+                pre_t.text = text[cursor:start]
+                new_runs.append(pre)
+            # Сам KPI токен — копия с emphasis.
+            kpi = deepcopy(r)
+            kpi_t = kpi.find(qn("a:t"))
+            kpi_t.text = text[start:end]
+            kpi_rPr = kpi.find(qn("a:rPr"))
+            if kpi_rPr is None:
+                kpi_rPr = etree.SubElement(kpi, qn("a:rPr"))
+                # Move rPr to be first child as required by OOXML schema.
+                kpi.insert(0, kpi_rPr)
+            _set_run_emphasis(kpi_rPr)
+            new_runs.append(kpi)
+            emphasized += 1
+            cursor = end
+
+        # Хвост после последнего match.
+        if cursor < len(text):
+            tail = deepcopy(r)
+            tail_t = tail.find(qn("a:t"))
+            tail_t.text = text[cursor:]
+            new_runs.append(tail)
+
+        # Замена исходного run-а на новую последовательность.
+        parent.remove(r)
+        for i, nr in enumerate(new_runs):
+            parent.insert(insert_idx + i, nr)
+
+    return emphasized
+
+
+def _shape_is_title_like(shape) -> bool:
+    """Эвристика: shape — это title, если есть placeholder type=TITLE
+    либо если первый run >= 28pt."""
+    try:
+        ph = shape.placeholder_format
+        if ph is not None:
+            from pptx.enum.shapes import PP_PLACEHOLDER
+            if ph.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE,
+                           PP_PLACEHOLDER.VERTICAL_TITLE):
+                return True
+    except (ValueError, AttributeError):
+        pass
+    # Heuristic by font size of the first run.
+    if not shape.has_text_frame:
+        return False
+    tf = shape.text_frame
+    for p in tf.paragraphs[:1]:
+        for run in p.runs[:1]:
+            try:
+                if run.font.size is not None and run.font.size.pt >= 28:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+    return False
+
+
+def emphasize_kpi_in_slide(slide) -> int:
+    """Применяет KPI-emphasis ко всем body-shape-ам слайда.
+
+    Возвращает количество подсвеченных токенов на слайде.
+    """
+    total = 0
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        if _shape_is_title_like(shape):
+            continue
+        # Walk paragraphs at XML level (python-pptx API возвращает Paragraph,
+        # но нам нужен прямой доступ к <a:p>).
+        txBody = shape.text_frame._txBody
+        for p_el in txBody.findall(qn("a:p")):
+            try:
+                total += _emphasize_paragraph(p_el)
+            except Exception as e:  # noqa: BLE001 — never fail the build
+                print(f"WARN: kpi emphasis paragraph failed: {e}", file=sys.stderr)
+    return total
+
+
+def apply_kpi_emphasis(prs, *, skip_slide_types: set[str] | None = None,
+                       plan_slides: list[dict[str, Any]] | None = None) -> dict[str, int]:
+    """Финальный пас по презентации.
+
+    Args:
+        prs: pptx.Presentation.
+        skip_slide_types: набор slide_type, для которых пропускаем emphasize
+            (например 'kpi_native' — render_kpi уже всё сделал).
+        plan_slides: parallel list к prs.slides (для соответствия slide_type).
+
+    Returns:
+        {'total': X, 'slides_touched': Y}
+    """
+    skip_types = skip_slide_types or {"kpi_native"}
+    total = 0
+    touched = 0
+    slides = list(prs.slides)
+    for idx, slide in enumerate(slides):
+        # Skip native slides where the renderer has already styled numbers.
+        if plan_slides and idx < len(plan_slides):
+            st = (plan_slides[idx] or {}).get("slide_type")
+            if st in skip_types:
+                continue
+        n = emphasize_kpi_in_slide(slide)
+        if n:
+            total += n
+            touched += 1
+    return {"total": total, "slides_touched": touched}
