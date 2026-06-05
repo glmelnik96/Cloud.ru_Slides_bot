@@ -161,10 +161,40 @@ def _is_title_placeholder(sp):
     return ph.get("type") in ("title", "ctrTitle")
 
 
-def clean_slide_to_blank(slide, keep_title=True):
+# D4 (2026-06-06): the active content zone (px → EMU). A decorative pic that
+# intersects this rectangle would collide with rendered content, so it is
+# removed even when keep_decor is on; pics fully outside (corners/edges) stay.
+_EMU_PER_PX = 9525
+CONTENT_ZONE_PX = (35, 120, 1245, 660)  # left, top, right, bottom
+CONTENT_ZONE_EMU = tuple(v * _EMU_PER_PX for v in CONTENT_ZONE_PX)
+
+
+def _pic_overlaps_content(child) -> bool:
+    """True if a <p:pic> element's bbox intersects CONTENT_ZONE_EMU. Missing
+    geometry → treat as overlapping (conservative: strip it)."""
+    spPr = child.find(qn("p:spPr"))
+    if spPr is None:
+        return True
+    xfrm = spPr.find(qn("a:xfrm"))
+    if xfrm is None:
+        return True
+    off = xfrm.find(qn("a:off"))
+    ext = xfrm.find(qn("a:ext"))
+    if off is None or ext is None:
+        return True
+    try:
+        x = int(off.get("x")); y = int(off.get("y"))
+        cx = int(ext.get("cx")); cy = int(ext.get("cy"))
+    except (TypeError, ValueError):
+        return True
+    l, t, r, b = CONTENT_ZONE_EMU
+    return not (x + cx <= l or x >= r or y + cy <= t or y >= b)
+
+
+def clean_slide_to_blank(slide, keep_title=True, keep_decor=False):
     """Удалить все shapes на slide, КРОМЕ title-placeholder шаблона (если
-    keep_title). Title-placeholder сохраняется и очищается от донорского текста,
-    чтобы заголовок вписывался в штатное место шаблона (Problem #6, 2026-05-29).
+    keep_title). При keep_decor=True декоративные <p:pic> вне контент-зоны
+    сохраняются (D4 reclaim), а пересекающие контент-зону — удаляются.
     Layout-inherited (logo, footer) останутся."""
     spTree = slide.shapes._spTree
     to_remove = []
@@ -178,6 +208,8 @@ def clean_slide_to_blank(slide, keep_title=True):
                     for p_el in txBody.findall(qn('a:p')):
                         for r_el in p_el.findall(qn('a:r')):
                             p_el.remove(r_el)
+                continue
+            if keep_decor and tag == 'pic' and not _pic_overlaps_content(child):
                 continue
             to_remove.append(child)
     for el in to_remove:
