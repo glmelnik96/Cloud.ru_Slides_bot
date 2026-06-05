@@ -32,6 +32,14 @@ from pptx.oxml.ns import qn
 # Cloud.ru brand green (canonical accent).
 _GREEN_HEX = "26D07C"
 
+# D2 fix (2026-06-05): green text on a green-filled box is invisible.
+# Live run1.slide8 had `12.18` recolored green inside a green accent box,
+# making the version number disappear. When the parent shape fills green
+# we either skip the emphasis (preserve original colour) or fall back to
+# graphite — both keep the number readable.
+_GREEN_FILL_HEXES = {"26D07C", "00D97B", "1AB066", "1ABF6F", "22C993", "2DD27D"}
+_GRAPHITE_HEX = "222222"
+
 # Размер шрифта в hundredths of points; >= 2800 = >= 28pt — это заголовки,
 # их не трогаем.
 _TITLE_FONT_THRESHOLD_HPT = 2800
@@ -66,19 +74,46 @@ def _qualifies(num: str, unit: str | None) -> bool:
     return digits >= 3
 
 
-def _set_run_emphasis(rPr: etree._Element) -> None:
-    """Мутирует <a:rPr>: b='1', color=#26D07C."""
+def _set_run_emphasis(rPr: etree._Element, *, color_hex: str = _GREEN_HEX) -> None:
+    """Мутирует <a:rPr>: b='1', color=<color_hex> (default green).
+
+    color_hex override lets the caller pick graphite when the parent shape
+    fills green — green-on-green would be invisible (D2 fix).
+    """
     rPr.set("b", "1")
-    # Удаляем существующий solidFill (если был), вставляем новый GREEN.
+    # Удаляем существующий solidFill (если был), вставляем новый.
     for sf in rPr.findall(qn("a:solidFill")):
         rPr.remove(sf)
     solid = etree.SubElement(rPr, qn("a:solidFill"))
     srgb = etree.SubElement(solid, qn("a:srgbClr"))
-    srgb.set("val", _GREEN_HEX)
+    srgb.set("val", color_hex)
 
 
-def _emphasize_paragraph(p_el: etree._Element) -> int:
-    """Разбивает runs параграфа по KPI-токенам, делает их bold+green.
+def _shape_fill_hex(shape) -> str | None:
+    """Return the shape's solid fill colour as an upper-case hex string,
+    or ``None`` if the shape has no solid fill (background/pattern/scheme).
+
+    Used to decide whether green KPI emphasis would be invisible against
+    a green-tinted box (D2 fix).
+    """
+    try:
+        fill = shape.fill
+        if fill is None or fill.type is None:
+            return None
+        rgb = fill.fore_color.rgb
+        if rgb is None:
+            return None
+        return str(rgb).upper()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _emphasize_paragraph(p_el: etree._Element, *,
+                         emphasis_hex: str = _GREEN_HEX) -> int:
+    """Разбивает runs параграфа по KPI-токенам, делает их bold+<emphasis_hex>.
+
+    ``emphasis_hex`` lets the caller override the colour when the parent
+    shape's fill would make green invisible (D2 fix).
 
     Возвращает количество подсвеченных токенов.
     """
@@ -128,7 +163,7 @@ def _emphasize_paragraph(p_el: etree._Element) -> int:
                 kpi_rPr = etree.SubElement(kpi, qn("a:rPr"))
                 # Move rPr to be first child as required by OOXML schema.
                 kpi.insert(0, kpi_rPr)
-            _set_run_emphasis(kpi_rPr)
+            _set_run_emphasis(kpi_rPr, color_hex=emphasis_hex)
             new_runs.append(kpi)
             emphasized += 1
             cursor = end
@@ -185,12 +220,19 @@ def emphasize_kpi_in_slide(slide) -> int:
             continue
         if _shape_is_title_like(shape):
             continue
+        # D2 fix: if the shape fills green, emphasising in green produces
+        # invisible text — fall back to graphite for readable contrast.
+        fill_hex = _shape_fill_hex(shape)
+        if fill_hex and fill_hex in _GREEN_FILL_HEXES:
+            emphasis_hex = _GRAPHITE_HEX
+        else:
+            emphasis_hex = _GREEN_HEX
         # Walk paragraphs at XML level (python-pptx API возвращает Paragraph,
         # но нам нужен прямой доступ к <a:p>).
         txBody = shape.text_frame._txBody
         for p_el in txBody.findall(qn("a:p")):
             try:
-                total += _emphasize_paragraph(p_el)
+                total += _emphasize_paragraph(p_el, emphasis_hex=emphasis_hex)
             except Exception as e:  # noqa: BLE001 — never fail the build
                 print(f"WARN: kpi emphasis paragraph failed: {e}", file=sys.stderr)
     return total

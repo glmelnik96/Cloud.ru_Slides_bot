@@ -319,6 +319,23 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
     infographics_slides = (arts.get("infographics") or {}).get("slides", [])
     icons_slides = (arts.get("icons") or {}).get("slides", [])
 
+    # D3 fix (2026-06-05): brief-derived title fallback for donor slides
+    # whose distributor output omits the title placeholder. Live run2.slide1
+    # rendered the cover with empty title because Agent 03 emitted no
+    # placeholder_assignment for ph_idx=1 of donor 4 — the slot stayed empty
+    # and build_v9 cleared the donor's "Заголовок" placeholder text. Source
+    # of truth for the topic is brief.topic (deck title) and BriefSlide
+    # .raw_title (per-slide title).
+    brief_data = arts.get("brief") or {}
+    brief_topic = (brief_data.get("topic") or "").strip()
+    brief_slides_by_num: dict[int, str] = {}
+    for bs in (brief_data.get("slides") or []):
+        if isinstance(bs, dict):
+            n = bs.get("num")
+            rt = (bs.get("raw_title") or "").strip()
+            if isinstance(n, int) and rt:
+                brief_slides_by_num[n] = rt
+
     cls_by_num = _by_num(classification_slides, key="num")
     lay_by_num = _by_num(layouts_slides, key="num")
     content_by_num = _by_num(content_slides, key="slide_num")
@@ -395,6 +412,26 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                     if key is None:
                         continue
                     slots[key] = pa.get("content", "")
+
+                # D3 fix (2026-06-05): if the donor has a "title" slot but
+                # the Distributor never assigned it, fall back to per-slide
+                # raw_title from brief, then deck topic for slide 1. Without
+                # this, build_v9 clears the donor's "Заголовок" placeholder
+                # and the slide renders with an empty title bar.
+                donor_slot_names = set(slot_name_map.values())
+                if "title" in donor_slot_names and not (slots.get("title") or "").strip():
+                    fallback = brief_slides_by_num.get(num) or (
+                        brief_topic if num == 1 else ""
+                    )
+                    if fallback:
+                        slots["title"] = fallback
+                        logger.info(
+                            "node.assemble.title_fallback",
+                            session_id=state.session_id,
+                            num=num, donor=int(donor),
+                            source="brief.raw_title" if num in brief_slides_by_num else "brief.topic",
+                        )
+
                 ps = PlanSlide(
                     clone_from_slide=int(donor),
                     slots=slots,

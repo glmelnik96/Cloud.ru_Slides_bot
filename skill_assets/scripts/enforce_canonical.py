@@ -340,9 +340,19 @@ def enforce_canonical_slide(slide, dark=False, min_pt=12, bump_from=None, bump_t
             # --- цвет ---
             col = _run_color(rPr)
             if col == "green":
-                _set_run_color(rPr, GRAPHITE_HEX); stats["green_text"] += 1
+                # D10 fix (2026-06-05): graphite is invisible on dark slides
+                # (run2.slide1: "Памятка по сигналам..." in green on dark).
+                # Switch to white on dark contexts, graphite on light.
+                replacement = "FFFFFF" if dark_ctx else GRAPHITE_HEX
+                _set_run_color(rPr, replacement); stats["green_text"] += 1
             elif col == "white" and not dark_ctx:
                 _set_run_color(rPr, GRAPHITE_HEX); stats["white_on_light"] += 1
+            elif col is None and dark_ctx:
+                # Inherited color (no explicit solidFill) on dark slide — if
+                # the inherited color happens to be dark (theme tx1), text
+                # disappears. Force explicit white to be safe. This catches
+                # run2.slide1 where the subtitle inherited green from layout.
+                _set_run_color(rPr, "FFFFFF"); stats["white_on_light"] += 1
             # --- жирность ---
             if rPr.get("b") == "1":
                 _set_semibold(rPr); stats["bold"] += 1

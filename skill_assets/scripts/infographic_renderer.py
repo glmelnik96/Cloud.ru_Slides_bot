@@ -289,3 +289,103 @@ def clear_donor_body_slots(slide, donor_def: dict[str, Any] | None) -> int:
             print(f"WARN: clear donor slot {slot_name!r} (idx={idx}) failed: {e}",
                   file=sys.stderr)
     return cleared
+
+
+# D1+D8 fix (2026-06-05): when injecting Agent 06's infographic shapes onto
+# a donor template, the donor often has its own pre-labeled boxes (process
+# steps, comparison cells) whose text isn't in the donor slot map — it lives
+# as plain text inside shapes that decorate the layout. The previous
+# `clear_donor_body_slots` only touched slot-mapped shapes, so donor labels
+# bled through and overlapped Agent 06's new labels (run1.slide7: "Recorder"
+# overlap "Хранение данных"). This is a more aggressive pass: clear *all*
+# non-title text on the slide, regardless of slot mapping.
+
+# Heuristic font-size threshold for "this is title-like" — donor titles are
+# typically 20pt+, body labels are 12-16pt. Conservative: keep anything 18pt+.
+_TITLE_FONT_PT_MIN = 18.0
+
+
+def _shape_is_title_like(shape) -> bool:
+    """Title detection independent of donor slot maps. Uses placeholder type
+    when available, otherwise the largest run font size. Mirrors the heuristic
+    in kpi_emphasis._shape_is_title_like but standalone (cyclic import-safe).
+    """
+    try:
+        ph = shape.placeholder_format
+        if ph is not None:
+            from pptx.enum.shapes import PP_PLACEHOLDER
+            if ph.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE,
+                           PP_PLACEHOLDER.VERTICAL_TITLE):
+                return True
+    except (ValueError, AttributeError):
+        pass
+    if not getattr(shape, "has_text_frame", False):
+        return False
+    # Largest font on any run — title rows usually have big numbers.
+    max_pt = 0.0
+    try:
+        for p in shape.text_frame.paragraphs:
+            for r in p.runs:
+                try:
+                    if r.font.size is not None:
+                        max_pt = max(max_pt, float(r.font.size.pt))
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        return False
+    return max_pt >= _TITLE_FONT_PT_MIN
+
+
+def clear_donor_non_title_text(slide) -> int:
+    """Strip text from every non-title shape on the slide.
+
+    Run before injecting infographic shapes so donor decoration labels
+    (process-step names, comparison cells, etc.) don't overlap the new
+    Agent 06 boxes. Title remains; everything else loses its text but
+    keeps its visual shape (fill/stroke). Recurses into groups and
+    table cells so the cleanup is complete.
+
+    Returns count of shapes whose text was cleared.
+    """
+    cleared = 0
+    try:
+        from build_v5 import clear_text_frame
+    except ImportError:
+        return 0
+
+    def _walk(shapes):
+        nonlocal cleared
+        for sh in shapes:
+            # Groups: recurse.
+            try:
+                if sh.shape_type == 6:  # MSO_SHAPE_TYPE.GROUP
+                    _walk(sh.shapes)
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            # Tables: blank every cell text frame (table itself is decoration).
+            if getattr(sh, "has_table", False) and sh.has_table:
+                for row in sh.table.rows:
+                    for cell in row.cells:
+                        try:
+                            clear_text_frame(cell.text_frame)
+                            cleared += 1
+                        except Exception:  # noqa: BLE001
+                            pass
+                continue
+            if not getattr(sh, "has_text_frame", False):
+                continue
+            if _shape_is_title_like(sh):
+                continue
+            text = (sh.text_frame.text or "").strip()
+            if not text:
+                continue
+            try:
+                clear_text_frame(sh.text_frame)
+                cleared += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"WARN: clear_donor_non_title_text failed: {e}",
+                      file=sys.stderr)
+
+    _walk(slide.shapes)
+    return cleared

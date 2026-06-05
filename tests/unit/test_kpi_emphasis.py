@@ -143,6 +143,55 @@ def test_apply_kpi_emphasis_processes_when_no_plan(blank_slide) -> None:
     assert stats["total"] >= 1
 
 
+def _count_emphasized_runs_with_color(slide, hex_upper: str) -> int:
+    """Like _count_emphasized_runs but parameterised on the expected colour."""
+    n = 0
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        txBody = shape.text_frame._txBody
+        for p in txBody.findall(qn("a:p")):
+            for r in p.findall(qn("a:r")):
+                rPr = r.find(qn("a:rPr"))
+                if rPr is None or rPr.get("b") != "1":
+                    continue
+                sf = rPr.find(qn("a:solidFill"))
+                if sf is None:
+                    continue
+                srgb = sf.find(qn("a:srgbClr"))
+                if srgb is not None and srgb.get("val", "").upper() == hex_upper:
+                    n += 1
+    return n
+
+
+def test_emphasize_falls_back_to_graphite_on_green_box(blank_slide) -> None:
+    """D2 fix: green KPI on a green-filled rect is invisible. The pass must
+    switch to graphite (#222222) when the parent shape fills brand green —
+    live run1.slide8 had `12.18` disappear inside an accent box."""
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Emu
+
+    prs, slide = blank_slide
+    # Add a green-filled rounded rect with KPI-shaped text in it.
+    shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                   Emu(100000), Emu(100000),
+                                   Emu(2000000), Emu(800000))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = RGBColor(0x26, 0xD0, 0x7C)  # #26D07C
+    tf = shape.text_frame
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = "v1.12.18 (май)"
+    run.font.size = Pt(14)
+
+    n = emphasize_kpi_in_slide(slide)
+    assert n >= 1, "KPI token should still be emphasized"
+    # Should be GRAPHITE, not GREEN — otherwise it disappears.
+    assert _count_emphasized_runs_with_color(slide, "222222") >= 1
+    assert _count_emphasized_runs_with_color(slide, "26D07C") == 0
+
+
 def test_emphasize_preserves_surrounding_text(blank_slide) -> None:
     """Run-splitting keeps the non-number text in separate plain runs."""
     prs, slide = blank_slide

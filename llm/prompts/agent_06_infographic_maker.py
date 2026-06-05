@@ -62,7 +62,8 @@ SAFE-AREA: x ∈ [{SAFE_AREA_PX["left"]}, {SAFE_AREA_PX["right"]}], y ∈ [{SAFE
 - промежуточный:     {BRAND_PALETTE["gray"]}
 - текст:             {BRAND_PALETTE["graphite"]} (на светлом и на зелёном)
 - белый текст:       только на тёмной (#222222 или чёрной) подложке
-- линии/стрелки:     {BRAND_PALETTE["graphite"]}, 1pt
+- линии/стрелки на светлом донорe: {BRAND_PALETTE["graphite"]}, 1pt
+- линии/стрелки на тёмном донорe (slide.dark=true / donor 6,7,8,13,22): БЕЛЫЕ #FFFFFF, 1.5pt — графитовые стрелки на тёмном фоне НЕВИДИМЫ (визуально провалили live run 2026-06-05).
 
 ЗАПРЕТЫ:
 - НЕ закруглять углы > 4 px (rounded_rect: использовать радиус 0..4 px только).
@@ -70,12 +71,21 @@ SAFE-AREA: x ∈ [{SAFE_AREA_PX["left"]}, {SAFE_AREA_PX["right"]}], y ∈ [{SAFE
 - НЕ ставить размер шрифта < 10 pt. Минимум 10, рекомендуется 12–14.
 - НЕ выходить за safe-area.
 - НЕ белый текст на зелёном. НЕ зелёный текст на белом.
+- НЕ оставлять >40% слайда пустым: блоки ОБЯЗАНЫ занимать ширину safe-area
+  (x ∈ [{SAFE_AREA_PX["left"]}, {SAFE_AREA_PX["right"]}]). Live verifier ругается
+  «huge empty area on the right» когда process из 3 блоков занимает только левую треть.
 
 ТИПЫ:
-- process: N прямоугольников в ряд + arrow между ними (gap 60 px, height 100–150 px).
-- flow: блоки + соединительные линии (допустима не-линейная сетка).
-- tree: parent → children через line.
-- comparison: 2 колонки (vs) или 2×2 matrix.
+- process: N прямоугольников в РЯД + arrow МЕЖДУ КАЖДОЙ ПАРОЙ блоков (N-1 стрелок,
+  тип "arrow"). Стрелки ОБЯЗАТЕЛЬНЫ — без них верифайер сообщает
+  «process diagram without flow indicators». Ширина блока: используй полную ширину
+  safe-area: block_width = (right - left - (N-1)*gap) / N, где gap=60 px.
+  Высота 100–150 px. На тёмном донорe stroke_color стрелок=#FFFFFF, на светлом=#222222.
+- flow: блоки + соединительные линии (допустима не-линейная сетка). Линии тоже
+  обязательны — это и есть «flow».
+- tree: parent → children через line. Линии обязательны.
+- comparison: 2 колонки (vs) или 2×2 matrix. Колонки занимают полную ширину
+  safe-area: col_width = (right - left - gap) / 2.
 - chart_bar/chart_pie: вернуть infographic_type=<type>, shapes=[] (chart рендерит chart_native_pptx).
 - none: инфографика не нужна, shapes=[].
 

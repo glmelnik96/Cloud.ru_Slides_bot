@@ -20,8 +20,10 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE  # noqa: E402
 from infographic_renderer import (  # noqa: E402  (path injected by skill_bridge)
     _parse_hex,
     clear_donor_body_slots,
+    clear_donor_non_title_text,
     render_infographic_shapes,
 )
+from pptx.util import Emu, Pt  # noqa: E402
 
 
 @pytest.fixture
@@ -181,3 +183,41 @@ def test_clear_donor_body_keeps_title(blank_slide) -> None:
 def test_clear_donor_body_handles_none_def(blank_slide) -> None:
     assert clear_donor_body_slots(blank_slide, None) == 0
     assert clear_donor_body_slots(blank_slide, {}) == 0
+
+
+def _add_textbox_with_text(slide, text: str, *, font_pt: int = 14):
+    """Helper: append a plain textbox with given text/font size."""
+    box = slide.shapes.add_textbox(Emu(100000), Emu(100000), Emu(2000000), Emu(500000))
+    tf = box.text_frame
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text
+    run.font.size = Pt(font_pt)
+    return box
+
+
+def test_clear_donor_non_title_text_clears_body_keeps_title(blank_slide) -> None:
+    """D1+D8 fix: non-title text on donor (process labels, comparison cells)
+    is cleared so Agent 06 shapes don't overlap pre-existing donor labels."""
+    title_box = _add_textbox_with_text(blank_slide, "Заголовок слайда", font_pt=24)
+    body1 = _add_textbox_with_text(blank_slide, "Recorder", font_pt=14)
+    body2 = _add_textbox_with_text(blank_slide, "Хранение данных", font_pt=12)
+
+    cleared = clear_donor_non_title_text(blank_slide)
+    # Two body labels cleared, title kept.
+    assert cleared >= 2
+    assert "Заголовок" in title_box.text_frame.text
+    assert (body1.text_frame.text or "").strip() == ""
+    assert (body2.text_frame.text or "").strip() == ""
+
+
+def test_clear_donor_non_title_text_handles_empty_slide(blank_slide) -> None:
+    assert clear_donor_non_title_text(blank_slide) == 0
+
+
+def test_clear_donor_non_title_text_skips_already_empty(blank_slide) -> None:
+    """No body text → nothing to clear."""
+    _add_textbox_with_text(blank_slide, "Title", font_pt=24)
+    _add_textbox_with_text(blank_slide, "", font_pt=14)
+    cleared = clear_donor_non_title_text(blank_slide)
+    assert cleared == 0

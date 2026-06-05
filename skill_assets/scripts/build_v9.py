@@ -66,10 +66,19 @@ try:
     from infographic_renderer import (
         render_infographic_shapes,
         clear_donor_body_slots,
+        clear_donor_non_title_text,
     )
     INFOGRAPHIC_RENDERER_AVAILABLE = True
 except ImportError:
     INFOGRAPHIC_RENDERER_AVAILABLE = False
+
+try:
+    from bullet_splitter import split_slot_if_body
+    BULLET_SPLITTER_AVAILABLE = True
+except ImportError:
+    BULLET_SPLITTER_AVAILABLE = False
+    def split_slot_if_body(_name, text):  # noqa: D401 — no-op fallback
+        return text
 
 EMU_PER_PX = 9525
 
@@ -319,11 +328,43 @@ def build(plan_path, template_path, output_path, donor_map_path):
                 if slot_name not in slot_defs:
                     print(f"WARN: slot '{slot_name}' undefined for donor {src_num}", file=sys.stderr)
                     continue
-                shape_idx = slot_defs[slot_name]["shape_idx"]
+                slot_cfg = slot_defs[slot_name]
+                shape_idx = slot_cfg["shape_idx"]
                 tf = get_text_frame_by_shape_idx(actual, shape_idx)
                 if tf is None:
                     continue
+                # D7 fix (2026-06-05): wall-of-text safety net. If a body
+                # slot landed with a single 300+-char paragraph (distributor
+                # didn't split), break at sentence boundaries so the donor's
+                # bullet styling actually renders it as a list.
+                if isinstance(new_text, str):
+                    new_text = split_slot_if_body(slot_name, new_text)
                 override = styles_override.get(slot_name)
+                # D9 fix (2026-06-05): cover title overflow. When the text
+                # noticeably exceeds the slot's safe_max_chars, proactively
+                # shrink the font size so it fits — donor 4 title (60pt,
+                # safe_max_chars=55) overflowed when the brief topic was
+                # 70+ chars. We avoid relying on renderer-side shrink-to-fit
+                # (normAutofit) because LibreOffice's autofit support is
+                # inconsistent across versions used by render_png.
+                txt_str = str(new_text or "")
+                safe_max = slot_cfg.get("safe_max_chars") or slot_cfg.get("max_chars")
+                base_size = (override or {}).get("size_pt") or slot_cfg.get("size_pt")
+                if (safe_max and base_size and txt_str
+                        and len(txt_str) > int(safe_max)):
+                    # Linear shrink with 0.70 floor (below that titles become
+                    # unreadable; better to let it clip than render at 8pt).
+                    scale = max(0.70, float(safe_max) / float(len(txt_str)))
+                    shrunk_pt = max(14, int(round(float(base_size) * scale)))
+                    if shrunk_pt < int(base_size):
+                        override = dict(override or {})
+                        override["size_pt"] = shrunk_pt
+                        print(
+                            f"autofit: slot={slot_name} donor={src_num} "
+                            f"len={len(txt_str)} safe_max={safe_max} "
+                            f"size_pt {base_size}→{shrunk_pt}",
+                            file=sys.stderr,
+                        )
                 replace_text_with_style(tf, new_text, override)
 
             # Очистить незаполненные обязательные слоты
@@ -346,12 +387,22 @@ def build(plan_path, template_path, output_path, donor_map_path):
         info_shapes = info_block.get("shapes") or []
         if info_shapes and INFOGRAPHIC_RENDERER_AVAILABLE:
             try:
+                # D1+D8 (2026-06-05): clear ALL non-title donor text before
+                # injecting infographic shapes. Donors often have pre-labeled
+                # boxes (process steps, comparison cells) whose labels aren't
+                # in donor_def.slots — the old slot-only cleanup left them in
+                # place, causing visual overlap with Agent 06's new boxes
+                # (run1.slide7 verified). clear_donor_body_slots is now a
+                # weaker layer behind the full-slide pass; we keep calling it
+                # for the count.
                 cleared = clear_donor_body_slots(actual, donor_def) if donor_def else 0
+                cleared_all = clear_donor_non_title_text(actual)
                 added = render_infographic_shapes(actual, info_shapes)
-                if added or cleared:
+                if added or cleared or cleared_all:
                     print(
                         f"infographic: slide donor={src_num} type={info_block.get('type')} "
-                        f"shapes_added={added}/{len(info_shapes)} donor_slots_cleared={cleared}",
+                        f"shapes_added={added}/{len(info_shapes)} "
+                        f"donor_slots_cleared={cleared} non_title_cleared={cleared_all}",
                         file=sys.stderr,
                     )
             except Exception as e:  # noqa: BLE001 — never fail the build
@@ -381,6 +432,24 @@ def build(plan_path, template_path, output_path, donor_map_path):
 
         # TABLES (v8: fill_existing если donor имеет встроенную таблицу с брендовым стилем!)
         table_data = plan_slide.get("table_data")
+        # D6 fix (2026-06-05): degenerate "tables" (one column, one row, or
+        # missing cell content) render as a thin sliver — visual verifier
+        # rejected slide as «table_native but no rows». Validate shape first;
+        # when too thin, drop the table_data and let the body slot carry the
+        # content as plain bullets.
+        if table_data:
+            is_degenerate = (
+                not isinstance(table_data, list)
+                or len(table_data) < 2
+                or not any(isinstance(r, list) and len(r) >= 2 for r in table_data)
+            )
+            if is_degenerate:
+                print(
+                    f"WARN: table_data degenerate (rows={len(table_data) if isinstance(table_data, list) else 0}); "
+                    f"skipping table render — content should already be in body slot",
+                    file=sys.stderr,
+                )
+                table_data = None
         if table_data:
             try:
                 # Найти существующую таблицу в donor (если есть)
