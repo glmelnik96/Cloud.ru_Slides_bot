@@ -24,6 +24,30 @@ from kpi_renderer import (
 EMU = 9525
 
 
+def _draw_browser_chrome(slide, x_px, y_px, w_px, h_px):
+    """Brand browser-chrome around a screenshot: green title-bar strip on top +
+    thin window outline. Coordinates are the PICTURE's placement (px)."""
+    from pptx.enum.shapes import MSO_SHAPE
+    BAR_H = 28
+    # Green title bar strip above the picture.
+    bar = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Emu(x_px * EMU), Emu((y_px - BAR_H) * EMU),
+        Emu(w_px * EMU), Emu(BAR_H * EMU))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = GREEN
+    bar.line.fill.background()
+    # Thin window outline around the picture (transparent fill, green line).
+    outline = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Emu(x_px * EMU), Emu(y_px * EMU),
+        Emu(w_px * EMU), Emu(h_px * EMU))
+    outline.fill.background()
+    outline.line.color.rgb = GREEN
+    outline.line.width = Pt(1.5)
+    return bar, outline
+
+
 def render_image_native(slide, image_config, dark=False, wide_zone=False):
     """
     Render image-as-content slide with auto-fit.
@@ -101,6 +125,12 @@ def render_image_native(slide, image_config, dark=False, wide_zone=False):
         Emu(final_x * EMU), Emu(final_y * EMU),
         width=Emu(final_w * EMU), height=Emu(final_h * EMU)
     )
+
+    # D5 (2026-06-06): screenshot chrome — green title bar + window outline.
+    subcat = str(image_config.get("subcategory", ""))
+    is_shot = image_config.get("frame") == "browser" or subcat.startswith("screenshot")
+    if is_shot:
+        _draw_browser_chrome(slide, final_x, final_y, final_w, final_h)
 
     # Caption — позиция зависит от zone (wide → ниже укороченного chart)
     # Для wide_zone (charts) — серая плашка под caption (как в эталоне slide 49)
