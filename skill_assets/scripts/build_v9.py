@@ -419,8 +419,9 @@ def build(plan_path, template_path, output_path, donor_map_path):
             "content_6subtitles", "content_8subtitles", "content_4block",
         )
         _OVERLAY_TYPES = ("comparison", "matrix", "process", "flow", "tree")
+        donor_is_structural = donor_cat in _STRUCTURAL_DONOR_CATS
         donor_already_structural = (
-            donor_cat in _STRUCTURAL_DONOR_CATS and info_type in _OVERLAY_TYPES
+            donor_is_structural and info_type in _OVERLAY_TYPES
         )
 
         # F1+F2 (2026-06-05): post-run7 visual review (eb6c4ceec3024bd9)
@@ -471,7 +472,31 @@ def build(plan_path, template_path, output_path, donor_map_path):
                 file=sys.stderr,
             )
 
-        needs_cleanup = bool(info_shapes) or case_a_drop_overlay
+        # F1b (2026-06-05): live run8c (6c4e33c898824936) slide 7 used donor
+        # 33 (content_6subtitles) with only `title` filled and NO Agent 06
+        # overlay. Donor 33's slot map declares only `title`; its template
+        # has 6 mock sub-headers ("Подзаголовок в две строки 20pt" + dup
+        # body) which weren't slot-mapped, so neither the slot-fill loop
+        # nor the F1 paths cleared them — 6 identical mock cells leaked.
+        # When a structural donor is paired with a sparse fill AND no
+        # overlay, wipe non-title decoration so we get a clean title-only
+        # frame instead of duplicated mock content.
+        sparse_structural_no_overlay = (
+            donor_is_structural
+            and filled_body_slots_count < 2
+            and not info_shapes
+        )
+        if sparse_structural_no_overlay:
+            print(
+                f"infographic: WIPE donor={src_num} cat={donor_cat} "
+                f"filled_body_slots={filled_body_slots_count} "
+                "(F1b: sparse structural, no overlay — clearing mock decoration)",
+                file=sys.stderr,
+            )
+
+        needs_cleanup = (
+            bool(info_shapes) or case_a_drop_overlay or sparse_structural_no_overlay
+        )
         if needs_cleanup and INFOGRAPHIC_RENDERER_AVAILABLE:
             try:
                 # D1+D8 (2026-06-05): clear ALL non-title donor text before
@@ -486,9 +511,10 @@ def build(plan_path, template_path, output_path, donor_map_path):
                     clear_donor_body_slots(actual, donor_def)
                     if donor_def and info_shapes else 0
                 )
-                if case_a_drop_overlay:
+                if case_a_drop_overlay or sparse_structural_no_overlay:
                     # Preserve filled-slot text so we don't wipe what the
-                    # distributor put into sub*/body* slots.
+                    # distributor put into sub*/body* slots (Case A: ≥2
+                    # body slots; F1b sparse: ≤1 body slot still preserved).
                     cleared_all = clear_donor_non_title_text(
                         actual, preserve_shape_idx=filled_slot_shape_indices,
                     )
@@ -503,7 +529,8 @@ def build(plan_path, template_path, output_path, donor_map_path):
                         f"infographic: slide donor={src_num} type={info_block.get('type')} "
                         f"shapes_added={added}/{len(info_shapes)} "
                         f"donor_slots_cleared={cleared} non_title_cleared={cleared_all} "
-                        f"case_a_drop_overlay={case_a_drop_overlay}",
+                        f"case_a_drop_overlay={case_a_drop_overlay} "
+                        f"sparse_no_overlay={sparse_structural_no_overlay}",
                         file=sys.stderr,
                     )
             except Exception as e:  # noqa: BLE001 — never fail the build

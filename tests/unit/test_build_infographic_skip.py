@@ -250,3 +250,66 @@ def test_case_a_preserves_filled_slot_text(tmp_workdir) -> None:
     assert "alpha-CASE-A" in txt, "Case A: filled body slot text was wiped"
     assert "beta-CASE-A" in txt, "Case A: filled body slot text was wiped"
     assert "gamma-CASE-A" in txt, "Case A: filled body slot text was wiped"
+
+
+# ---------------------------------------------------------------------------
+# F1b (2026-06-05): live run8c (6c4e33c898824936) slide 7 used donor 33
+# (content_6subtitles) with only `title` filled and NO Agent 06 overlay.
+# Donor 33's slot map declares only `title`; its template has 6 mock
+# sub-headers ("Подзаголовок в две строки 20pt" + duplicated body) that
+# weren't slot-mapped, so neither the slot-fill loop nor F1 paths cleared
+# them — 6 identical mock cells leaked through.
+# ---------------------------------------------------------------------------
+
+
+_DONOR33_MOCK_SUBHEADER = "Подзаголовок в две строки"
+
+
+def test_f1b_sparse_structural_no_overlay_clears_mock(tmp_workdir) -> None:
+    """donor 33 (content_6subtitles) with only `title` filled and NO
+    Agent 06 overlay → donor mock sub-headers MUST be cleared so we get
+    a clean title-only slide instead of duplicated mock content.
+    """
+    plan_slide = {
+        "clone_from_slide": 33,
+        "slots": {
+            "title": "Основные направления применения",
+            # No sub*/body* — replicates live run8c.slide7 distributor output.
+        },
+        # No infographic block — Agent 06 produced nothing for this slide.
+    }
+    out = _build_one(tmp_workdir, plan_slide)
+    prs = Presentation(out)
+    txt = _slide_text(prs.slides[0])
+    # Mock decoration MUST be absent (F1b cleanup fired).
+    assert _DONOR33_MOCK_SUBHEADER not in txt, (
+        "F1b: donor 33 mock sub-headers leaked through despite sparse "
+        "structural no-overlay cleanup rule"
+    )
+    # Title MUST be preserved.
+    assert "Основные направления применения" in txt, (
+        "F1b: cleanup wiped the title — it must be preserved"
+    )
+
+
+def test_f1b_one_filled_body_slot_preserves_it(tmp_workdir) -> None:
+    """donor 33 + title + 1 body slot filled, no overlay → mock cleared
+    AND the one filled body slot's text is preserved (if its shape_idx
+    is declared in the donor map; otherwise the assertion is vacuous).
+    """
+    plan_slide = {
+        "clone_from_slide": 33,
+        "slots": {
+            "title": "Sparse fill",
+            "body1": "lone-body-F1B",
+        },
+    }
+    out = _build_one(tmp_workdir, plan_slide)
+    prs = Presentation(out)
+    txt = _slide_text(prs.slides[0])
+    # Mock decoration MUST be absent.
+    assert _DONOR33_MOCK_SUBHEADER not in txt, (
+        "F1b: mock leaked despite sparse-structural-no-overlay rule"
+    )
+    # Title preserved.
+    assert "Sparse fill" in txt
