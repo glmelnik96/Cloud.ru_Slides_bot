@@ -40,3 +40,24 @@ def test_opaque_without_render_returns_none(tmp_path):
         extract_dir=tmp_path, render_pngs={},
     )
     assert path is None
+
+
+def test_render_all_slides_indexes_by_num(tmp_path, monkeypatch):
+    from graph.nodes import pipeline
+
+    # Simulate render output: directory with slide-01.png .. slide-03.png
+    out = tmp_path / "render"
+    out.mkdir()
+    for i in (1, 2, 3):
+        (out / f"slide-{i:02d}.png").write_bytes(b"\x89PNG\r\n")
+
+    def fake_run(*a, **k):
+        class R: returncode = 0; stderr = ""
+        return R()
+
+    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pipeline.tempfile, "mkdtemp", lambda prefix="": str(out))
+
+    mapping = pipeline._render_all_slides_png(tmp_path / "dummy.pptx")
+    assert set(mapping.keys()) == {1, 2, 3}
+    assert mapping[2].endswith("slide-02.png")

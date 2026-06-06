@@ -105,6 +105,36 @@ def _render_first_slide_png(pptx_path: Path) -> str | None:
         return None
 
 
+def _render_all_slides_png(pptx_path):
+    """Render every slide to PNG via render_slides.py. Returns {slide_num: path}.
+
+    Empty dict if soffice/pdftoppm unavailable (caller degrades). Output files
+    are named slide-01.png, slide-02.png, … (1-based) by the vendored script.
+    """
+    script = Path(skill_bridge.SKILL_SCRIPTS) / "render_slides.py"
+    if not script.is_file():
+        return {}
+    out_dir = Path(tempfile.mkdtemp(prefix="slidesbot_renderall_"))
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), str(pptx_path), str(out_dir)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            logger.warning("node.parse.render_all_failed",
+                           stderr=result.stderr[-500:] if result.stderr else "")
+            return {}
+        mapping = {}
+        for png in sorted(out_dir.glob("slide-*.png")):
+            stem = png.stem.split("-")[-1]
+            if stem.isdigit():
+                mapping[int(stem)] = str(png)
+        return mapping
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("node.parse.render_all_unavailable", error=str(e))
+        return {}
+
+
 def extract_images_extract(pptx_path, out_dir, manifest=None):
     """Thin wrapper around the vendored extractor (monkeypatchable in tests)."""
     skill_bridge.install()
