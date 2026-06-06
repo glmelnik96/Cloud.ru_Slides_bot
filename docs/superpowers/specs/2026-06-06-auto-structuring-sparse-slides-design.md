@@ -107,3 +107,30 @@ After `arts["content"] = …`, call the detector and, if non-empty, emit `node.d
 - On dl1/dl2/dl3, `node.distribute.sparse_candidates` enumerates the genuinely underfilled slides and excludes the healthy/dense ones (verified by eye against the rendered PNGs).
 - Unit tests: `body_slot_count` against real donors; `_detect_sparse_slides` over synthetic eligible/exempt/sparse/dense fixtures (incl. exemption of natives, splits, image/divider categories, and the 1–2-slot-donor guard).
 - All existing tests stay green.
+
+## 8. Phase 1 Telemetry Findings (2026-06-06)
+
+Detector shipped (commits 6ac8aaf → 779dd3c) and run live on dl1/dl2/dl3. A temporary, container-only probe (`node.distribute.sparse_eligible`, never committed) additionally logged the fill ratio of **every** eligible slide, not just flagged ones, so we could see the distribution behind the zero-flag result.
+
+**Raw result (threshold A = ≤50% body slots filled, or ≥4 slots with ≤2 filled):**
+
+| Deck | Total slides | Eligible (text/multicolumn, ≥3 body slots) | Sparse flagged | Eligible fill ratios |
+|------|-------------:|-------------------------------------------:|---------------:|----------------------|
+| dl1  | 9  | **0** | 0 | — (no flat 3+-slot donor at all) |
+| dl2  | 36 | 1 (slide 27, donor 34) | 0 | 3/3 = **1.0** |
+| dl3  | 7  | 1 (slide 6, donor 34)  | 0 | 3/3 = **1.0** |
+
+Across **52 slides only 2 were eligible**, and **both were fully packed (ratio 1.0)**.
+
+**Verdict on threshold A:** not "too conservative" — *structurally silent*. The slot-count fill ratio is the wrong signal. Two independent reasons:
+
+1. **Eligible slides are rare.** After Agent 02/04 + the Feature-1 visual injectors, almost every slide becomes a native (kpi/chart/table/flow/image), a title/divider, or a 1–2-slot donor. Flat `text`/`multicolumn` slides landing in a 3+-body-slot donor are the exception, not the rule (2/52 here).
+2. **The distributor fills every slot it is given.** Agent 04 sizes the donor to the content *before* distribution, then Agent 03 (GLM) packs all body slots. So `filled == total` is the norm — an empty body slot essentially never reaches build. "Lonely header over empty decoration" does **not** manifest as empty *slots*.
+
+**Implication for Phase 2 — pivot the metric.** If genuine underfill exists, it manifests as body slots filled with *trivially little text* (1–2 words), not as empty slots. The remedy detector should measure **content volume** (e.g. total body chars across slots below a floor, or per-slot chars tiny) rather than slot occupancy. The `content_chars` list already logged in the `sparse_candidates` payload is the right raw signal; Phase 2 should first gather its distribution on a larger corpus.
+
+**Recommended Phase 2 starting point:**
+- Replace the occupancy ratio with a content-volume threshold; keep the same eligibility gate (text/multicolumn donor route, not split).
+- **Quantify scale first.** With only 2 eligible slides in 52, the sparse-flat-slide problem may be small in practice. Before building a remedy, gather volume telemetry across a wider deck set to confirm the problem is worth a mutation path — otherwise Phase 2 may not be warranted at all.
+
+**Incidental:** dl2 aborted in build with a pre-existing `flow_renderer.add_block` IndexError (empty `bolds` list, `flow_renderer.py:357`, reached via `render_flow_diagram_slide:1226`) — unrelated to this telemetry change (which only logs; dl2's distribute telemetry emitted normally before the crash). Tracked separately.
