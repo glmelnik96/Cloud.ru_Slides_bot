@@ -24,6 +24,37 @@ def test_raster_uses_extracted_image(tmp_path, monkeypatch):
     assert path is not None and path.endswith("slide9_img1.png")
 
 
+def test_raster_without_extractable_falls_back_to_render(tmp_path, monkeypatch):
+    # Group-nested raster the non-recursive extractor can't see → empty manifest.
+    rendered = tmp_path / "slide-11.png"
+    rendered.write_bytes(b"\x89PNG\r\n")
+
+    def fake_extract(pptx, outdir, manifest=None):
+        return {"images": []}
+
+    monkeypatch.setattr("graph.nodes.pipeline.extract_images_extract", fake_extract)
+    path = _media_prep_for_slide(
+        pptx_path=Path("dummy.pptx"), slide_num=11, visual_kind="raster",
+        extract_dir=tmp_path, render_pngs={11: str(rendered)},
+    )
+    assert path == str(rendered)
+
+
+def test_raster_extract_raises_falls_back_to_render(tmp_path, monkeypatch):
+    rendered = tmp_path / "slide-12.png"
+    rendered.write_bytes(b"\x89PNG\r\n")
+
+    def boom(pptx, outdir, manifest=None):
+        raise RuntimeError("extractor blew up")
+
+    monkeypatch.setattr("graph.nodes.pipeline.extract_images_extract", boom)
+    path = _media_prep_for_slide(
+        pptx_path=Path("dummy.pptx"), slide_num=12, visual_kind="raster",
+        extract_dir=tmp_path, render_pngs={12: str(rendered)},
+    )
+    assert path == str(rendered)
+
+
 def test_opaque_uses_rendered_png(tmp_path):
     rendered = tmp_path / "slide-08.png"
     rendered.write_bytes(b"\x89PNG\r\n")

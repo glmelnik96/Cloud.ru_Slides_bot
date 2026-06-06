@@ -153,14 +153,17 @@ def _media_prep_for_slide(pptx_path, slide_num, visual_kind, extract_dir, render
     if visual_kind == "raster":
         try:
             manifest = extract_images_extract(pptx_path, extract_dir)
+            imgs = [im for im in manifest.get("images", []) if im.get("slide_num") == slide_num]
         except Exception as e:
             logger.warning("node.parse.media_prep_extract_failed", slide=slide_num, error=str(e))
-            return None
-        imgs = [im for im in manifest.get("images", []) if im.get("slide_num") == slide_num]
-        if not imgs:
-            return None
-        best = max(imgs, key=lambda im: (im.get("width_px") or 0) * (im.get("height_px") or 0))
-        return str(Path(extract_dir) / best["file"])
+            imgs = []
+        if imgs:
+            best = max(imgs, key=lambda im: (im.get("width_px") or 0) * (im.get("height_px") or 0))
+            return str(Path(extract_dir) / best["file"])
+        # Extraction yielded no raster (commonly a group-nested picture the
+        # non-recursive extractor misses) → fall back to the full-slide render
+        # (design §5: "extract_images yields no raster → switch to B").
+        return render_pngs.get(slide_num)
     if visual_kind == "opaque":
         return render_pngs.get(slide_num)
     return None
@@ -255,9 +258,11 @@ def parse_node(state: SessionState) -> dict[str, Any]:
         )
         if img_path:
             s["image_path"] = img_path
+            # raster that fell back to the rendered PNG is really an image_b.
+            rendered = img_path in render_pngs.values()
+            route = "image_a" if (vk == "raster" and not rendered) else "image_b"
             logger.info("node.parse.visual_route", slide=s["num"],
-                        kind=vk, route=("image_a" if vk == "raster" else "image_b"),
-                        image_path=img_path)
+                        kind=vk, route=route, image_path=img_path)
         else:
             logger.warning("node.parse.no_image", slide=s["num"], kind=vk)
     arts["parsed_deck"] = pd
