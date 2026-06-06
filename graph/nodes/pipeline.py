@@ -123,7 +123,7 @@ def _media_prep_for_slide(pptx_path, slide_num, visual_kind, extract_dir, render
         try:
             manifest = extract_images_extract(pptx_path, extract_dir)
         except Exception as e:
-            logger.warning("media_prep.extract_failed", slide=slide_num, error=str(e))
+            logger.warning("node.parse.media_prep_extract_failed", slide=slide_num, error=str(e))
             return None
         imgs = [im for im in manifest.get("images", []) if im.get("slide_num") == slide_num]
         if not imgs:
