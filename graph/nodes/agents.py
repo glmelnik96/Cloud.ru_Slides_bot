@@ -370,6 +370,7 @@ def _inject_visual_slides(
 # is intentionally light or specialised — never a sparse "flat donor" case.
 _SPARSE_CATEGORIES = ("text", "multicolumn")
 _SPARSE_MIN_BODY_SLOTS = 3
+_SPARSE_FILL_RATIO = 0.50
 
 
 def _detect_sparse_slides(
@@ -421,7 +422,7 @@ def _detect_sparse_slides(
                 filled += 1
                 chars.append(len(text))
         ratio = filled / total if total else 0.0
-        sparse = (ratio <= 0.50) or (total >= 4 and filled <= 2)
+        sparse = (ratio <= _SPARSE_FILL_RATIO) or (total >= 4 and filled <= 2)
         if not sparse:
             continue
         out.append({
@@ -432,7 +433,7 @@ def _detect_sparse_slides(
             "body_slots_total": total,
             "body_slots_filled": filled,
             "fill_ratio": round(ratio, 2),
-            "real_item_count": filled,
+            "real_item_count": filled,  # alias of body_slots_filled; kept distinct for Phase-2 remedy API
             "content_chars": chars,
         })
     return out

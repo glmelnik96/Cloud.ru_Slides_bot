@@ -66,8 +66,9 @@ def test_dense_3col_all_filled_is_not_flagged():
 
 
 def test_4block_two_filled_is_flagged():
-    # donor 29: 4 body slots, 2 filled → total>=4 and filled<=2 → sparse,
-    # even though ratio (0.5) only just hits the boundary.
+    # donor 29: 4 body slots, 2 filled → ratio exactly 0.50, caught by the
+    # ratio clause. (The total>=4/filled<=2 clause is spec-required but adds
+    # no coverage over the ratio clause for integer slot counts.)
     from graph import donor_map
     body = sorted(donor_map.body_ph_indices(29))
     cls = _cls([{"num": 5, "category": "multicolumn"}])
