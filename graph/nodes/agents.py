@@ -365,6 +365,79 @@ def _inject_visual_slides(
     return {"image": img_n, "flow": flow_n}
 
 
+# Categories the sparse detector inspects. Everything else (title/divider/
+# image/logo/pattern_bg/team/timeline/callout and all native slide_types)
+# is intentionally light or specialised — never a sparse "flat donor" case.
+_SPARSE_CATEGORIES = ("text", "multicolumn")
+_SPARSE_MIN_BODY_SLOTS = 3
+
+
+def _detect_sparse_slides(
+    classification: dict[str, Any],
+    layouts: dict[str, Any],
+    content: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Flag text/multicolumn slides that fill <= half of their donor's body
+    slots — "lonely header over empty brand decoration".
+
+    Telemetry-only (Phase 1): returns diagnostics, mutates nothing. Runs at
+    the end of ``distribute_node`` where both the chosen donor (capacity) and
+    the placed content (fill) are known. See spec §4.
+    """
+    from graph import donor_map  # noqa: WPS433 — local import keeps cycle clear
+
+    cls_by_num: dict[int, dict[str, Any]] = {
+        int(s.get("num", 0)): s for s in (classification.get("slides") or [])
+    }
+    lay_by_num: dict[int, dict[str, Any]] = {
+        int(s.get("num", 0)): s for s in (layouts.get("slides") or [])
+    }
+
+    out: list[dict[str, Any]] = []
+    for cs in (content.get("slides") or []):
+        num = int(cs.get("slide_num", 0))
+        cls = cls_by_num.get(num) or {}
+        if cls.get("_split_part"):
+            continue
+        category = cls.get("category")
+        if category not in _SPARSE_CATEGORIES:
+            continue
+        layout_idx = cs.get("layout_idx") or (lay_by_num.get(num) or {}).get("layout_idx") or 0
+        if not layout_idx:  # native render — no donor to underfill
+            continue
+        layout_idx = int(layout_idx)
+        total = donor_map.body_slot_count(layout_idx)
+        if total < _SPARSE_MIN_BODY_SLOTS:
+            continue
+        body_idxs = donor_map.body_ph_indices(layout_idx)
+        filled = 0
+        chars: list[int] = []
+        for pa in (cs.get("placeholder_assignments") or []):
+            ph = pa.get("ph_idx")
+            if ph is None or int(ph) not in body_idxs:
+                continue
+            text = (pa.get("content") or "").strip()
+            if text:
+                filled += 1
+                chars.append(len(text))
+        ratio = filled / total if total else 0.0
+        sparse = (ratio <= 0.50) or (total >= 4 and filled <= 2)
+        if not sparse:
+            continue
+        out.append({
+            "num": num,
+            "source_slide": cls.get("_source_slide") or num,
+            "category": category,
+            "layout_idx": layout_idx,
+            "body_slots_total": total,
+            "body_slots_filled": filled,
+            "fill_ratio": round(ratio, 2),
+            "real_item_count": filled,
+            "content_chars": chars,
+        })
+    return out
+
+
 def classify_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.CLASSIFYING, pct=25, detail="классификация слайдов")
     arts = _artefacts(state)
