@@ -28,6 +28,17 @@ def _layouts(slides):
     return {"slides": slides}
 
 
+def _make_state(arts):
+    """Minimal SessionState carrying artefacts (user_id/chat_id are required)."""
+    from schemas.session import SessionInput, SessionState
+    inp = SessionInput(
+        session_id="test-sparse", user_id=1, chat_id=1,
+        progress_message_id=0, mode="verstai", input_s3_key=None,
+    )
+    s = SessionState.from_input(inp)
+    return s.model_copy(update={"artefacts": dict(arts)})
+
+
 def test_sparse_3col_one_filled_is_flagged():
     # donor 34: 3 body slots; only 1 carries text → ratio 0.33 <= 0.5 → sparse.
     cls = _cls([{"num": 7, "category": "multicolumn"}])
@@ -172,14 +183,3 @@ def test_distribute_node_logs_sparse_candidates(monkeypatch):
 
     assert patch["artefacts"]["content"] == content_dump  # unchanged
     assert logged.get("count") == 1
-
-
-def _make_state(arts):
-    """Minimal SessionState carrying artefacts (user_id/chat_id are required)."""
-    from schemas.session import SessionInput, SessionState
-    inp = SessionInput(
-        session_id="test-sparse", user_id=1, chat_id=1,
-        progress_message_id=0, mode="verstai", input_s3_key=None,
-    )
-    s = SessionState.from_input(inp)
-    return s.model_copy(update={"artefacts": dict(arts)})

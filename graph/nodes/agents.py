@@ -594,6 +594,7 @@ def distribute_node(state: SessionState) -> dict[str, Any]:
     sparse = _detect_sparse_slides(
         classification, layouts, arts["content"])
     if sparse:
+        # full diagnostic dicts — Phase-1 telemetry; Phase-2 can narrow the payload
         logger.info(
             "node.distribute.sparse_candidates",
             session_id=state.session_id,
