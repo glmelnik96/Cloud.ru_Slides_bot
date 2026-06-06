@@ -122,3 +122,64 @@ def test_native_slide_skipped():
     con = _content([{"slide_num": 6, "layout_idx": 0,
                      "placeholder_assignments": []}])
     assert _detect_sparse_slides(cls, lay, con) == []
+
+
+def test_distribute_node_logs_sparse_candidates(monkeypatch):
+    """distribute_node calls the detector and logs when candidates exist,
+    without altering arts['content']."""
+    from graph.nodes import agents
+    from graph import donor_map
+    from llm.prompts import agent_03_content_distributor
+
+    body = sorted(donor_map.body_ph_indices(34))
+    classification = {"slides": [{"num": 7, "category": "multicolumn"}]}
+    layouts = {"slides": [{"num": 7, "layout_idx": 34}]}
+    content_dump = {"slides": [{"slide_num": 7, "layout_idx": 34,
+                                "placeholder_assignments": [
+                                    {"ph_idx": body[0], "ph_type": "BODY",
+                                     "content": "Один пункт."},
+                                    {"ph_idx": body[1], "ph_type": "BODY", "content": ""},
+                                    {"ph_idx": body[2], "ph_type": "BODY", "content": ""},
+                                ]}]}
+
+    class _FakeContent:
+        slides = [object()]  # len() only
+
+        def model_dump(self):
+            return content_dump
+
+    # Run the node fully offline: no Redis publish, no prompt build, no LLM.
+    monkeypatch.setattr(agents, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(agent_03_content_distributor, "build_messages",
+                        lambda *a, **k: [])
+    monkeypatch.setattr(agents, "call_and_parse",
+                        lambda **kw: (_FakeContent(), None))
+
+    logged = {}
+    real_info = agents.logger.info
+
+    def _capture(event, **kw):
+        if event == "node.distribute.sparse_candidates":
+            logged["count"] = kw.get("count")
+        return real_info(event, **kw)
+
+    monkeypatch.setattr(agents.logger, "info", _capture)
+
+    state = _make_state(arts={
+        "brief": {}, "classification": classification, "layouts": layouts,
+    })
+    patch = agents.distribute_node(state)
+
+    assert patch["artefacts"]["content"] == content_dump  # unchanged
+    assert logged.get("count") == 1
+
+
+def _make_state(arts):
+    """Minimal SessionState carrying artefacts (user_id/chat_id are required)."""
+    from schemas.session import SessionInput, SessionState
+    inp = SessionInput(
+        session_id="test-sparse", user_id=1, chat_id=1,
+        progress_message_id=0, mode="verstai", input_s3_key=None,
+    )
+    s = SessionState.from_input(inp)
+    return s.model_copy(update={"artefacts": dict(arts)})

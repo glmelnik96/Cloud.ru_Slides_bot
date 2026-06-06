@@ -591,8 +591,18 @@ def distribute_node(state: SessionState) -> dict[str, Any]:
         model_cls=_DeckContentAssignment,
     )
     arts["content"] = content.model_dump()
+    sparse = _detect_sparse_slides(
+        classification, layouts, arts["content"])
+    if sparse:
+        logger.info(
+            "node.distribute.sparse_candidates",
+            session_id=state.session_id,
+            count=len(sparse),
+            slides=sparse,
+        )
     logger.info("node.distribute.done", session_id=state.session_id,
-                slides=len(content.slides))
+                slides=len(content.slides),
+                sparse_candidates=len(sparse))
     return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 50}
 
 
