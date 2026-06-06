@@ -1,98 +1,100 @@
 # Sparse Slides — Content-Volume Telemetry (Phase 2A) — Design Spec
 
 **Date:** 2026-06-06
-**Status:** Draft (pending user review)
-**Topic:** Phase 1 proved that *slot occupancy* is the wrong signal for "lonely header over empty brand decoration" — the distributor fills every body slot it is given, so `filled == total` is the norm. This spec pivots the metric to **content volume** and stays telemetry-only: measure how much real text actually lands in each eligible donor across a wider corpus, so we can decide — from data — whether a sparse remedy (Phase 2B) is warranted at all, and at what floor.
+**Status:** Draft (pending user review) — revised after offline corpus probe
+**Topic:** Phase 1 keyed sparse detection on body-slot *occupancy* and flagged nothing. An offline probe over 46 historical assemble plans (deduped) confirms **why and corrects the picture**: on real flat donors the distributor fills every slot (occupancy = 0% useful signal), and genuine underfill manifests as body slots holding *trivially little text* (1–2 words). This spec ships a single **per-slot word-volume** telemetry signal (telemetry-only, no mutation), drops the occupancy signal entirely, and guards against timeline donors that mimic sparseness by design.
 
 Prerequisite reading: `2026-06-06-auto-structuring-sparse-slides-design.md` §8 (Phase 1 findings).
 
 ---
 
-## 1. Problem (carried over from Phase 1 §8)
+## 1. Problem & Corpus Evidence
 
-Phase 1 shipped a deterministic detector keyed on body-slot **occupancy** (`filled / total`). Run live on dl1/dl2/dl3 (52 slides) it flagged **0** slides: only 2 were even eligible, and both were fully packed (ratio 1.0).
+Phase 1 detected sparseness via `filled / total` body-slot **occupancy** and flagged 0/52 on dl1/dl2/dl3. To learn whether the sparse-flat problem is real, an **uncommitted offline probe** measured content volume across **all 46 persisted `plan.json` dumps** (no LLM, no pipeline run — pure read of assembled plans; body slot = slot name resolving to OOXML `BODY`).
 
-Two structural reasons, confirmed in code:
-1. **Eligible slides are rare.** After Agent 02/04 + the visual injectors, almost every slide becomes a native (kpi/chart/table/flow/image), a title/divider, or a 1–2-slot donor. Flat `text`/`multicolumn` slides landing in a 3+-body-slot donor are the exception (2/52).
-2. **The distributor fills every slot it is given.** Agent 04 sizes the donor to the content *before* distribution; Agent 03 then packs all body slots. So an empty body slot essentially never reaches build. Underfill, if it exists, manifests as slots holding *trivially little text* (1–2 words), not as empty slots.
+**Deduped findings (44 unique eligible flat-donor slides):**
 
-We therefore do not yet know whether genuine sparse-flat slides occur often enough — or thin enough — to justify a mutation path. We need the **content-volume distribution** before designing any remedy.
+| Signal | Slides | Share |
+|---|---:|---:|
+| empty body slot (Phase-1 occupancy) | **0** | **0.0%** |
+| ≥1 thin body slot (≤2 words) | 3 | 6.8% |
+| whole-slide word_total ≤ 12 | 3 | 6.8% |
+| **union (any sparse signal)** | **4** | **9.1%** |
+
+Healthy slides are well-filled: word_total median **47**, p25 33. The thin tail (e.g. donor 34, body 3/3 but `[1,2,2]` = 5 words) sits far below, so the gap is clean.
+
+**Two corrections to the Phase-1 picture:**
+1. **Occupancy is dead, and Phase 1 was right.** On real flat donors every body slot is filled (`fill_ratio` histogram = `{1.0: 44}`). Agent 04 sizes the donor to content, Agent 03 packs every slot. An empty body slot never reaches build.
+2. **The earlier "27%" was timeline contamination.** Before excluding timeline donors, occupancy looked like a 19.6% signal — but those were all donor 60 (`step1_date/step1_body … step10_body`): a variable-length roadmap where partial fill is *by design*, not sparseness. Excluding timeline donors drops occupancy to 0% and total prevalence to ~9%.
+
+**Conclusion:** the genuine sparse-flat population is **~7–9%**, concentrated on multi-column donors (esp. donor 34, the 3-column feature layout), and detectable **only** by content volume — specifically per-slot word count.
 
 ## 2. Goal & Non-Goals
 
-**Goal:** Emit, for **every eligible** slide (not just flagged ones), a content-volume telemetry record so we can plot the char-per-body-slot distribution across a wider deck set, then decide whether Phase 2B (remedy) is warranted and pick a data-driven floor.
+**Goal:** Emit, for every eligible flat-donor slide, a per-slot **word-volume** telemetry record so the thin tail is observable in production and confirmed against the offline numbers before any remedy ships.
 
 **Non-Goals:**
-- **No mutation.** Like Phase 1, pipeline output stays byte-identical. This is pure observation.
-- **No remedy.** Repacking into a smaller donor / native preset is Phase 2B, gated on these numbers.
-- **No new threshold enforcement.** We log volume; we do not yet *flag* on it. (We may keep emitting the Phase-1 occupancy `sparse_candidates` line unchanged for continuity, but it is not the decision signal.)
-- No changes to `build_v9`, `donor-slot-map.yaml`, the native paths, or the injectors.
+- **No mutation.** Output stays byte-identical (same as Phase 1).
+- **No occupancy signal.** The Phase-1 `fill_ratio` / `sparse_candidates` occupancy path is **removed**, not kept — it flags nothing on flat donors and only produced timeline false positives.
+- **No remedy.** Repacking is Phase 2B, gated and low-priority (§6).
+- **No two-metric design.** Single signal: per-slot word count. (Prior draft proposed chars+words+occupancy; the probe shows words alone is the discriminator.)
+- No changes to `build_v9`, `donor-slot-map.yaml`, native paths, or injectors.
 
-## 3. The Metric Pivot
+## 3. The Signal
 
-**Phase 1 (retired as a decision signal):** `fill_ratio = body_slots_filled / body_slots_total`.
+Per eligible slide, for each **filled** body slot record its word count; flag the slide for telemetry when it has a thin slot.
 
-**Phase 2A (new observation signal):** per eligible slide, measure real text volume in body slots:
-- `body_char_total` — sum of trimmed chars across all body-slot assignments.
-- `body_char_per_slot` — `[len(text) for each filled body slot]` (already collected as `content_chars` in the Phase-1 payload, but only emitted *when flagged*; here it is emitted for **every eligible slide**).
-- `body_word_total` — sum of whitespace-split word counts across body slots (words discriminate "1–2 words per slot" underfill better than chars for short labels).
-- `thin_slot_count` — number of filled body slots whose word count `<= _THIN_SLOT_WORDS` (starting probe value, see §5). Observation only — not a flag.
+- `body_words_per_slot` — `[len(text.split()) for each filled body slot]`.
+- `thin_slot_count` — number of filled body slots with `words <= _SPARSE_THIN_WORDS`.
+- `body_word_total` — sum across body slots (context for judging the whole-slide extreme tail).
 
-This mirrors exactly the widening the throwaway `sparse_eligible` probe did for occupancy in Phase 1, but for volume and **committed** this time (so the corpus can be gathered over normal live runs, not a one-off patch).
+`_SPARSE_THIN_WORDS = 2` — a body slot carrying ≤2 words is "thin" (matches the 3 flagged slides; median healthy slot is far above). Telemetry-only: a slide is *logged* when `thin_slot_count >= 1`; nothing is mutated.
 
-## 4. Where it hooks (unchanged from Phase 1)
+## 4. Where it hooks & Eligibility
 
-Same site: end of `distribute_node`, reusing the same eligibility gate as `_detect_sparse_slides` (§4.3 of Phase 1):
+Same site and gate as Phase 1 (`distribute_node` tail). Eligibility, with **one addition**:
 - `layout_idx != 0` (donor route),
 - `category in {text, multicolumn}`,
 - not a `_split_part`,
-- `body_slots_total >= 3`.
-
-The volume probe inspects the *same* eligible set; it simply records volume for all of them instead of applying the occupancy trigger.
+- `body_slots_total >= 3`,
+- **NEW: not a timeline donor** — a donor whose slot names include both `*_date` and `step\d+_body` is a variable-length roadmap; partial fill is intentional, so it is exempt (this is what produced the false-positive "underfill" in the probe).
 
 ## 5. Components (Phase 2A, isolated + testable)
 
-### 5.1 `_eligible_body_volume(classification, layouts, content) -> list[dict]` — NEW, pure
-Refactors the eligibility loop out of `_detect_sparse_slides` (§3 above is the gate; the two helpers should share it rather than duplicate it) and returns, for **every eligible slide**, a volume record:
+### 5.1 `donor_map.is_timeline_donor(layout_idx) -> bool` — NEW, pure
+Returns True when the donor exposes paired `*_date` + `step\d+_body` slots. Reuses `_load()`; independently unit-testable (donor 60 → True; donor 34/33/29 → False).
+
+### 5.2 Replace `_detect_sparse_slides` body with the volume signal — MODIFIED
+Keep the function name and call site; swap the trigger from occupancy to thin-slot volume, add the timeline guard, and update the payload:
 ```
 {num, source_slide, category, layout_idx,
  body_slots_total, body_slots_filled,
- body_char_total, body_char_per_slot:[...],
- body_word_total, thin_slot_count}
+ body_words_per_slot:[...], thin_slot_count, body_word_total}
 ```
-No I/O, no mutation. Unit-testable on synthetic dicts.
+The occupancy fields (`fill_ratio`, `real_item_count`) and `_SPARSE_FILL_RATIO` constant are removed. Pure, no I/O, no mutation.
 
-**Shared eligibility:** extract the gate (split/category/layout/min-slots checks) into one private predicate used by both `_detect_sparse_slides` and `_eligible_body_volume`, so the two telemetry views can never drift on what "eligible" means.
+### 5.3 `distribute_node` log rename — 1 line
+Emit `node.distribute.sparse_volume` (was `sparse_candidates`) with the new payload. The `node.distribute.done sparse_candidates=N` summary field is renamed `thin_slides=N`. Nothing else changes.
 
-### 5.2 Probe constant
-- `_THIN_SLOT_WORDS = 2` — a body slot with ≤2 words is "thin". **Starting probe value only**, used solely to populate `thin_slot_count` for inspection; nothing is flagged on it. The real floor is set from the gathered distribution before any Phase-2B flag exists.
+## 6. Phase 2B (remedy) — gated, LOW priority
 
-### 5.3 `distribute_node` wiring — 1 call + 1 log
-After the existing `sparse_candidates` log, call `_eligible_body_volume` and, if non-empty, emit:
-```
-node.distribute.sparse_volume  count=N  slides=[ {volume records...} ]
-```
-Nothing else changes. The Phase-1 `sparse_candidates` line stays for continuity.
-
-## 6. Corpus & Calibration Plan
-
-1. Ship 2A telemetry-only.
-2. Run across a **wider deck set** than dl1/dl2/dl3 — gather `sparse_volume` over the next N real/seeded live runs (target: enough eligible slides to see a distribution, not 2).
-3. Plot `body_word_total` and `body_char_per_slot` for eligible slides; eyeball the rendered PNGs of the thin tail against the input.
-4. **Decision gate:** if eligible slides remain rare *and* none are genuinely thin → **close the feature; do not build Phase 2B.** The §8 finding explicitly warns the problem may be too small to warrant a mutation path. Only if a real thin population emerges do we proceed to Phase 2B with a floor read off the data.
+The corpus says the problem is real but modest (~9%, of which only ~2–4% are egregious like the 5-word slide). Per quality-over-tokens it is worth fixing (a 3-column donor holding 5 words is a visible defect), but scope tightly:
+- Trigger on the **egregious tail only** (e.g. whole-slide `body_word_total` below a floor, or ≥2 thin slots), not all 9%.
+- Concentrate on the multi-column donors that actually exhibit it (donor 34-like).
+- Built in a separate spec/plan once 2A confirms the offline numbers hold in live production.
 
 ## 7. Risks & Mitigations
-- **Still measuring a rare population.** Accepted and intended — the whole point of 2A is to quantify scale before building. The decision gate (§6) can legitimately end with "no remedy."
-- **Eligibility drift between the two telemetry helpers.** Mitigated by §5.1 shared predicate + a unit test asserting both helpers agree on the eligible set for a fixture.
-- **Words vs chars ambiguity.** We log both; calibration picks the better discriminator empirically rather than guessing now.
+- **Tiny population → remedy may not pay off.** Accepted; 2A is cheap telemetry and 2B is explicitly gated on confirming the tail in prod.
+- **Timeline-guard misses a variant.** The `*_date` + `step\d+_body` pattern matches the known roadmap donors; a unit test pins donor 60 → exempt, 34/33/29 → eligible. If a new roadmap donor appears without that naming it would be a false positive again — caught by eyeballing flagged PNGs.
+- **Thin threshold off.** ≤2 words is read from the flagged set; recalibrate from live `sparse_volume` if the tail shifts.
 
 ## 8. Success Criteria (Phase 2A)
-- `node.distribute.sparse_volume` emits for every eligible slide with no change to produced decks (output diff = ∅), verified by the same no-mutation property test as Phase 1.
-- Unit tests: `_eligible_body_volume` over synthetic fixtures (eligible thin / eligible dense / exempt category / split / native / <3-slot guard); shared-eligibility test asserting parity with `_detect_sparse_slides`'s gate.
-- All existing tests stay green.
-- A short findings section (like §8 of the Phase-1 spec) appended once the corpus is gathered, ending in an explicit **build / do-not-build** verdict on Phase 2B.
+- `node.distribute.sparse_volume` emits per thin flat-donor slide with no change to produced decks (output diff = ∅), verified by the same no-mutation property test as Phase 1.
+- Unit tests: `is_timeline_donor` (60→True, 34/33/29→False); the rewritten detector over synthetic fixtures (thin 3-col flagged; dense 3-col not; timeline donor exempt; split/native/<3-slot exempt; full-occupancy-but-thin flagged — the case occupancy missed).
+- All existing tests stay green; Phase-1 occupancy tests updated to the volume signal.
+- Findings appended once live `sparse_volume` confirms (or refutes) the ~9% offline figure, ending in an explicit **build / do-not-build** verdict on Phase 2B.
 
-## 9. Open Questions (for user review)
-1. **Corpus source.** Phase 1 used dl1/dl2/dl3. For a volume distribution we need more eligible slides than 52 total decks produced (2). Do we (a) wait and accumulate over organic live runs, or (b) seed a batch of deliberately sparse flat decks to force the eligible population up? (b) gets data faster but is synthetic.
-2. **Words vs chars as the headline metric** — happy to log both and decide at calibration, or do you have a prior preference?
-3. **Keep or retire the Phase-1 `sparse_candidates` occupancy line?** It flags nothing in practice; keeping it is harmless continuity, retiring it reduces log noise.
+## 9. Resolved (was Open Questions)
+1. **Corpus source** — resolved for free via the offline `plan.json` probe (44 unique eligible slides); no organic accumulation or synthetic seeding needed.
+2. **Words vs chars** — words. Per-slot word count is the discriminator; chars/occupancy dropped.
+3. **Keep Phase-1 occupancy line?** — removed. It flags nothing on flat donors; its only hits were timeline false positives.
