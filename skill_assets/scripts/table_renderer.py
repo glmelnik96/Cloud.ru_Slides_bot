@@ -294,6 +294,9 @@ def _set_cell_text(cell, text, size_pt=12, bold=False, color_rgb=None):
 TABLE_FONT_DEFAULT_PT = 16
 TABLE_FONT_COMFORT_MIN_PT = 12
 TABLE_FONT_HARD_MIN_PT = 10
+# Плотные «справочные» таблицы (много строк, длинные ячейки) могут потребовать
+# шрифта мельче 10pt чтобы уместиться на одном слайде целиком (как в исходнике).
+TABLE_FONT_DENSE_MIN_PT = 8
 _CELL_MARGIN_X_PX = 24   # 12 + 12
 _CELL_MARGIN_V_PX = 16   # 8 + 8
 
@@ -337,6 +340,64 @@ def _autofit_table_font(headers, data, col_widths, row_h, header_h,
         if fits:
             return fpt
     return int(hard_min)
+
+
+def _row_required_height(row, col_widths, char_w, line_h, min_h):
+    """Высота строки = max по ячейкам числа переносов × line_h + верт. поля.
+
+    Короткие ячейки дают 1 строку (min_h), длинная ячейка задаёт высоту всей
+    строки — но НЕ остальных строк. Это позволяет таблице с 1-2 длинными
+    ячейками уместиться целиком, не раздувая все строки.
+    """
+    max_lines = 1
+    for c_i, cell in enumerate(row):
+        if c_i >= len(col_widths):
+            break
+        usable_w = col_widths[c_i] - _CELL_MARGIN_X_PX
+        lines = _estimate_cell_lines(cell, usable_w, char_w)
+        if lines > max_lines:
+            max_lines = lines
+    return max(int(min_h), int(max_lines * line_h + _CELL_MARGIN_V_PX))
+
+
+def _fit_table_layout(headers, data, col_widths, avail_h,
+                      start_pt=TABLE_FONT_DEFAULT_PT,
+                      hard_min=TABLE_FONT_DENSE_MIN_PT,
+                      header_min=40, row_min=28):
+    """Подобрать шрифт + ПЕРЕМЕННЫЕ высоты строк так, чтобы сумма ≤ avail_h.
+
+    Возвращает (font_pt, header_h, [row_h, ...]). В отличие от равномерного
+    row_h с полом 40px (который раздувал плотные таблицы за пределы слайда),
+    здесь высота каждой строки зависит от её реального контента, а шрифт
+    уменьшается (16→8pt) пока СУММА высот не уместится в безопасную зону.
+    Так таблица из dl1 (15 строк, одна ячейка 272 симв.) влезает целиком.
+
+    target = avail_h × 0.92 — запас под то, что LibreOffice при рендере
+    немного «раздувает» строки с многострочными ячейками сверх нашей оценки
+    (set-высота строки трактуется как МИНИМУМ). Запас не даёт таблице вылезти
+    за safe-bottom после авторазворачивания строк.
+    """
+    rows = list(data)
+    target = avail_h * 0.92
+    chosen = None
+    for fpt in range(int(start_pt), int(hard_min) - 1, -1):
+        font_px = fpt * 4.0 / 3.0
+        char_w = 0.64 * font_px            # консервативнее (0.64 vs 0.60)
+        line_h = 1.32 * font_px
+        header_h = _row_required_height(headers, col_widths, char_w, line_h, header_min)
+        row_heights = [_row_required_height(r, col_widths, char_w, line_h, row_min)
+                       for r in rows]
+        total = header_h + sum(row_heights)
+        chosen = (fpt, header_h, row_heights, total)
+        if total <= target:
+            return fpt, header_h, row_heights
+    # Не уместилось даже на hard_min — пропорционально сжать (best-effort).
+    fpt, header_h, row_heights, total = chosen
+    if total > target and total > 0:
+        scale = target / total
+        header_h = max(int(header_h * scale), 24)
+        row_heights = [max(int(h * scale), 20) for h in row_heights]
+    return fpt, header_h, row_heights
 
 
 def _strip_default_table_style(table):
@@ -616,7 +677,7 @@ def render_table_native(slide, table_config, dark=False):
     if subtitle:
         _add_subtitle(slide, subtitle, dark=dark)
 
-    # 2. Расчёт размеров таблицы
+    # 2. Базовые координаты/ширина таблицы
     table_x = table_config.get("x", SAFE_LEFT)
     table_y = table_config.get("y", 170 if subtitle else 160)
     table_w = table_config.get("w", SAFE_W)
@@ -625,18 +686,8 @@ def render_table_native(slide, table_config, dark=False):
     header_h = table_config.get("header_height", 50)
     row_h = table_config.get("row_height")
 
-    if table_h is None and row_h is None:
-        # Заполнить доступную safe-area
-        avail_h = SAFE_BOTTOM - table_y - 20  # 20 px зазор перед footer
-        row_h = max(40, (avail_h - header_h) // n_data_rows)
-        table_h = header_h + row_h * n_data_rows
-    elif table_h is None:
-        # row_h задан
-        table_h = header_h + row_h * n_data_rows
-    elif row_h is None:
-        row_h = max(30, (table_h - header_h) // n_data_rows)
-
-    # 3. Распределение ширин колонок
+    # 3. Распределение ширин колонок (нужно ДО расчёта высот — высота строки
+    #    зависит от переносов текста, а перенос — от ширины колонки)
     first_col_wider = table_config.get("first_col_wider", True)
     if first_col_wider and n_cols >= 2:
         # Первая колонка 1.4× от остальных
@@ -653,7 +704,30 @@ def render_table_native(slide, table_config, dark=False):
         col_widths = [table_w // n_cols] * n_cols
         col_widths[-1] = table_w - sum(col_widths[:-1])
 
-    # 4. Создание таблицы
+    # 4. Высоты строк + автошрифт.
+    #    auto-режим (h и row_height не заданы): переменные высоты строк под
+    #    контент + автоуменьшение шрифта, чтобы сумма уместилась в safe-area.
+    forced = table_config.get("font_size")
+    auto_layout = (table_h is None and row_h is None)
+    if auto_layout:
+        avail_h = SAFE_BOTTOM - table_y - 20  # 20 px зазор перед footer
+        fit_font, header_h, row_heights = _fit_table_layout(
+            headers, data, col_widths, avail_h)
+        body_font = int(forced) if forced else fit_font
+        table_h = header_h + sum(row_heights)
+    else:
+        if table_h is None:
+            table_h = header_h + row_h * n_data_rows
+        elif row_h is None:
+            row_h = max(30, (table_h - header_h) // n_data_rows)
+        row_heights = [row_h] * n_data_rows
+        if forced:
+            body_font = int(forced)
+        else:
+            body_font = _autofit_table_font(headers, data, col_widths, row_h, header_h)
+    header_font = body_font
+
+    # 5. Создание таблицы
     table_shape = slide.shapes.add_table(
         n_rows_total, n_cols,
         Emu(table_x * EMU), Emu(table_y * EMU),
@@ -662,30 +736,20 @@ def render_table_native(slide, table_config, dark=False):
     table = table_shape.table
     _strip_default_table_style(table)
 
-    # 5. Установить ширины колонок
+    # 6. Установить ширины колонок
     for i, w in enumerate(col_widths):
         table.columns[i].width = Emu(w * EMU)
 
-    # 6. Установить высоты строк
+    # 7. Установить высоты строк (header + переменные data rows)
     table.rows[0].height = Emu(header_h * EMU)
     for r in range(1, n_rows_total):
-        table.rows[r].height = Emu(row_h * EMU)
+        table.rows[r].height = Emu(row_heights[r - 1] * EMU)
 
     # Все cell-level borders ВЫКЛЮЧЕНЫ — границы будем рисовать отдельными
     # connector lines поверх таблицы (см. шаг 9). Это обеспечивает гарантированную
     # visibility во всех приложениях (PowerPoint Mac/Win, Keynote, LibreOffice),
     # независимо от applied table style.
     no_borders = {"left": False, "right": False, "top": False, "bottom": False}
-
-    # Размер шрифта (Problem #5): дефолт 16pt, авто-уменьшение пока не влезает
-    # (до 12pt комфортно, 10pt — крайняя перегрузка). Можно форсировать
-    # table_config["font_size"]. Header и body — один размер, header SemiBold.
-    forced = table_config.get("font_size")
-    if forced:
-        body_font = int(forced)
-    else:
-        body_font = _autofit_table_font(headers, data, col_widths, row_h, header_h)
-    header_font = body_font
 
     # 7. Заполнить header row (row 0)
     for c_idx, header_text in enumerate(headers):
@@ -714,7 +778,7 @@ def render_table_native(slide, table_config, dark=False):
     _draw_table_borders_as_lines(
         slide, table_config,
         table_x, table_y, table_w, table_h,
-        col_widths, header_h, row_h, n_data_rows
+        col_widths, header_h, row_heights, n_data_rows
     )
 
     return table_shape
@@ -722,7 +786,7 @@ def render_table_native(slide, table_config, dark=False):
 
 def _draw_table_borders_as_lines(slide, table_config,
                                   table_x, table_y, table_w, table_h,
-                                  col_widths, header_h, row_h, n_data_rows):
+                                  col_widths, header_h, row_heights, n_data_rows):
     """Нарисовать границы как отдельные line shapes поверх таблицы.
 
     Управление через `table_config['borders']` dict:
@@ -767,10 +831,11 @@ def _draw_table_borders_as_lines(slide, table_config,
         col_x.append(col_x[-1] + w)
     # col_x = [left, after_col1, after_col2, ..., right]
 
-    # Y-координаты границ строк (header + data rows)
+    # Y-координаты границ строк (header + data rows, переменные высоты)
     row_y = [table_y, table_y + header_h]
-    for _ in range(n_data_rows):
-        row_y.append(row_y[-1] + row_h)
+    for i in range(n_data_rows):
+        rh = row_heights[i] if i < len(row_heights) else row_heights[-1]
+        row_y.append(row_y[-1] + rh)
     # row_y = [top, after_header, after_data_row1, ..., bottom]
 
     table_bottom = row_y[-1]

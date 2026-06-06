@@ -55,6 +55,7 @@ def parse(input_path):
             "images": [],
             "shapes_count": 0,
             "tables_count": 0,
+            "tables": [],
         }
 
         for shape in slide.shapes:
@@ -94,9 +95,39 @@ def parse(input_path):
                     "width_emu": shape.width, "height_emu": shape.height,
                 })
 
-            # Tables
+            # Tables — extract real cell text so downstream agents can render
+            # the actual data (previously only the count was kept, so table
+            # content was silently dropped → donor-53 PNG-stub placeholder).
             if shape.has_table:
                 sdata["tables_count"] += 1
+                tbl = shape.table
+                grid = []
+                merged = False
+                for row in tbl.rows:
+                    cells = list(row.cells)
+                    row_vals = [c.text.strip() for c in cells]
+                    grid.append(row_vals)
+                    if any(getattr(c, "is_spanned", False)
+                           or getattr(c, "is_merge_origin", False) for c in cells):
+                        merged = True
+                widths = {len(r) for r in grid}
+                regular = (
+                    len(grid) >= 2
+                    and len(widths) == 1
+                    and next(iter(widths)) >= 2
+                    and not merged
+                )
+                sdata["tables"].append({
+                    "headers": grid[0] if grid else [],
+                    "rows": grid[1:] if len(grid) > 1 else [],
+                    "regular": regular,
+                })
+                # Surface the table content as text so vision/LLM nodes that
+                # read `body` also see it (pipe-delimited, one row per line).
+                for r in grid:
+                    line = " | ".join(v for v in r if v)
+                    if line:
+                        sdata["body"].append(line)
 
         result["slides"].append(sdata)
 

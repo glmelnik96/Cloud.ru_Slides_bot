@@ -134,6 +134,25 @@ class FlowBlock(BaseModel):
     bolds: list[bool] = Field(default_factory=list)
     fill: Literal["gray", "green", "white"] | None = None
 
+    @model_validator(mode="after")
+    def _backfill_lines(self):
+        """Если агент положил текст блока в `text`/`title`/`label`/`caption`
+        (extra-поля) вместо канонического `lines`, перенести его в `lines` —
+        иначе flow_renderer рисует пустые рамки (dl1 slide-7 defect: блоки
+        Recorder/OBS/SMN/Timeline пришли с lines=[] и text="Recorder")."""
+        if not self.lines:
+            extra = self.__pydantic_extra__ or {}
+            collected = []
+            for key in ("title", "text", "label", "caption"):
+                v = extra.get(key)
+                if isinstance(v, str) and v.strip():
+                    collected.append(v.strip())
+                elif isinstance(v, list):
+                    collected.extend(str(x).strip() for x in v if str(x).strip())
+            if collected:
+                self.lines = collected
+        return self
+
 
 class FlowArrow(BaseModel):
     # populate_by_name lets us roundtrip through `model_dump()` (which emits
@@ -567,6 +586,8 @@ class ParsedSlide(BaseModel):
     images: list[ParsedImage] = Field(default_factory=list)
     shapes_count: int = 0
     tables_count: int = 0
+    # Extracted table grids: [{"headers": [...], "rows": [[...]], "regular": bool}]
+    tables: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ParsedDeck(BaseModel):

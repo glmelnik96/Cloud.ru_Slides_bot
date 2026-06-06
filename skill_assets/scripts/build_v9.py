@@ -82,6 +82,112 @@ except ImportError:
 
 EMU_PER_PX = 9525
 
+# Geometry-aware subtitle fit (D-fix 2026-06-06): some title donors (e.g.
+# donor 5 "title_white_with_3d") carry a tiny subtitle box (≈338×54px) anchored
+# near the slide bottom, designed for a short "speaker/caption" string. When the
+# real subtitle is a full sentence (≤ donor max_chars but far too long for that
+# box) it wraps to 4-5 lines and clips off the bottom edge. char-based autofit
+# never fires because len(text) ≤ max_chars. This guard measures the actual box
+# geometry and (a) widens a narrow bottom-region box into the clear area and
+# (b) shrinks the font until the wrapped text fits the available vertical space.
+_SUBTITLE_SAFE_BOTTOM_PX = 690   # leave room for footer copyright strip
+_SUBTITLE_SAFE_RIGHT_PX = 1245
+_SUBTITLE_MIN_PT = 16
+_SUBTITLE_BOTTOM_REGION_PX = 540  # only widen boxes anchored below this (clear)
+
+
+def _fit_subtitle_box(shape, base_pt, text):
+    """Resize/shrink a subtitle shape so multi-line text does not clip.
+
+    Mutates ``shape`` width when it is a narrow box in the bottom region.
+    Returns the (possibly shrunk) font size in pt, or ``None`` to leave the
+    donor size untouched.
+    """
+    import math
+    try:
+        top_px = shape.top / EMU_PER_PX
+        left_px = shape.left / EMU_PER_PX
+        width_px = shape.width / EMU_PER_PX
+    except Exception:
+        return None
+    base_pt = float(base_pt or 20)
+    txt = str(text or "")
+    if not txt.strip():
+        return None
+
+    # (a) Widen a narrow box that sits in the clear bottom region.
+    if width_px < 800 and top_px >= _SUBTITLE_BOTTOM_REGION_PX:
+        new_width_px = max(width_px, _SUBTITLE_SAFE_RIGHT_PX - left_px)
+        try:
+            shape.width = Emu(int(new_width_px * EMU_PER_PX))
+            width_px = new_width_px
+        except Exception:
+            pass
+    try:
+        shape.text_frame.word_wrap = True
+    except Exception:
+        pass
+
+    avail_h = (_SUBTITLE_SAFE_BOTTOM_PX - top_px) * 0.90  # 10% breathing room
+    if avail_h <= 0:
+        return None
+
+    # Longest explicit line drives wrapping; also honour hard newlines.
+    segments = [seg for seg in txt.replace("\v", "\n").split("\n")] or [txt]
+
+    def _lines_at(pt):
+        font_px = pt * 1.3333
+        char_w = font_px * 0.52  # conservative for SB Sans Display
+        line_h = font_px * 1.30
+        cpl = max(1, int(width_px / char_w))
+        total = 0
+        for seg in segments:
+            total += max(1, math.ceil(len(seg) / cpl))
+        return total * line_h
+
+    pt = base_pt
+    while pt > _SUBTITLE_MIN_PT and _lines_at(pt) > avail_h:
+        pt -= 1
+    if pt < base_pt:
+        return int(round(pt))
+    return None
+
+
+_TITLE_MIDWORD_MIN_PT = 40
+
+
+def _fit_title_no_midword_break(shape, base_pt, text):
+    """Shrink a title font so its longest word fits the box width on one line.
+
+    Divider donors carry very large title fonts (e.g. donor 13 = 96pt in a
+    1024px box). A single long word ("ТЕХНИЧЕСКИЙ") then exceeds the box width
+    and LibreOffice breaks it mid-word ("ТЕХНИЧЕСКИ"/"Й"). char-based autofit
+    misses this because total length is small. Returns a reduced pt or None.
+    """
+    try:
+        width_px = shape.width / EMU_PER_PX
+    except Exception:
+        return None
+    base_pt = float(base_pt or 60)
+    words = [w for w in str(text or "").split() if w]
+    if not words:
+        return None
+    longest = max(words, key=len)
+    # All-caps Cyrillic/Latin glyphs are much wider than mixed case.
+    cased = [c for c in longest if c.isalpha()]
+    is_upper = bool(cased) and longest == longest.upper()
+    factor = 0.80 if is_upper else 0.58
+    target_w = width_px * 0.95
+    pt = base_pt
+    while pt > _TITLE_MIDWORD_MIN_PT:
+        word_w = len(longest) * pt * 1.3333 * factor
+        if word_w <= target_w:
+            break
+        pt -= 2
+    if pt < base_pt:
+        return int(round(pt))
+    return None
+
 
 def clone_slide(prs, src_slide):
     """Глубоко копирует slide-part и регистрирует его в presentation.
@@ -321,6 +427,21 @@ def build(plan_path, template_path, output_path, donor_map_path):
                         else:
                             remove_idx_list.append(idx_to_strip)
 
+            # remove_if_slot_empty: {slot_name: shape_idx}. Удаляем декоративный
+            # shape слота, когда slot ПРИСУТСТВУЕТ в plan, но его значение пустое.
+            # remove_if_not_used (выше) срабатывает только когда ключа нет вовсе;
+            # Distributor же часто кладёт caption="" — донор 62 тогда оставлял
+            # пустую белую карточку (dl2 slide-19). Здесь чистим и этот случай.
+            remove_when_empty = donor_def.get("remove_if_slot_empty", {}) or {}
+            if isinstance(remove_when_empty, dict):
+                for slot_name, idx_to_strip in remove_when_empty.items():
+                    val = slots_filled_now.get(slot_name)
+                    if not (isinstance(val, str) and val.strip()):
+                        if isinstance(idx_to_strip, list):
+                            remove_idx_list += idx_to_strip
+                        else:
+                            remove_idx_list.append(idx_to_strip)
+
             # WARN если donor_type=fixed_png_content и нет ни remove_before_fill, ни overrides
             dtype = donor_def.get("donor_type")
             if dtype == "fixed_png_content" and not remove_idx_list:
@@ -387,7 +508,60 @@ def build(plan_path, template_path, output_path, donor_map_path):
                             f"size_pt {base_size}→{shrunk_pt}",
                             file=sys.stderr,
                         )
+                # Title mid-word-break guard: shrink large divider/title fonts
+                # so the longest word fits the box width on a single line.
+                if slot_name == "title" and txt_str.strip():
+                    try:
+                        ttl_shape = list(actual.shapes)[shape_idx]
+                    except Exception:
+                        ttl_shape = None
+                    if ttl_shape is not None:
+                        ttl_base = (override or {}).get("size_pt") or base_size or 60
+                        fitted_t = _fit_title_no_midword_break(
+                            ttl_shape, ttl_base, txt_str
+                        )
+                        if fitted_t is not None and fitted_t < float(ttl_base):
+                            override = dict(override or {})
+                            override["size_pt"] = fitted_t
+                            print(
+                                f"autofit: slot=title donor={src_num} "
+                                f"len={len(txt_str)} midword-fit "
+                                f"size_pt {ttl_base}→{fitted_t}",
+                                file=sys.stderr,
+                            )
+                # Subtitle overflow guard: geometry-aware fit for title-slide
+                # subtitle boxes that are too small/low for a full sentence.
+                if slot_name == "subtitle" and txt_str.strip():
+                    try:
+                        sub_shape = list(actual.shapes)[shape_idx]
+                    except Exception:
+                        sub_shape = None
+                    if sub_shape is not None:
+                        sub_base = (override or {}).get("size_pt") or base_size or 20
+                        fitted = _fit_subtitle_box(sub_shape, sub_base, txt_str)
+                        if fitted is not None and fitted < float(sub_base):
+                            override = dict(override or {})
+                            override["size_pt"] = fitted
+                            print(
+                                f"autofit: slot=subtitle donor={src_num} "
+                                f"len={len(txt_str)} geom-fit "
+                                f"size_pt {sub_base}→{fitted}",
+                                file=sys.stderr,
+                            )
                 replace_text_with_style(tf, new_text, override)
+                # Body-text слоты: принудительно TOP vertical-anchor. Донорские
+                # body-плейсхолдеры шаблона якорятся ПО НИЗУ (vanchor=BOTTOM,
+                # template slide 21/22), поэтому короткий текст тонет к низу
+                # бокса, оставляя верх слайда пустым (dl1 slide-5/6 imbalance).
+                # Title/number/quote/subtitle сохраняют свой дизайнерский якорь.
+                if slot_name == "body" or (
+                    slot_name[:4] == "body" and slot_name[4:].isdigit()
+                ):
+                    try:
+                        from pptx.enum.text import MSO_ANCHOR
+                        tf.vertical_anchor = MSO_ANCHOR.TOP
+                    except Exception:
+                        pass
 
             # Очистить незаполненные обязательные слоты
             for slot_name, slot_def in slot_defs.items():

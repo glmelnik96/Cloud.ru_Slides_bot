@@ -468,6 +468,42 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
             skipped.append(num)
             continue
 
+        # Donor-table data wiring (2026-06-06): table donors (53/54 —
+        # ``fixed_png_content`` carrying ``remove_if_user_provides_table``)
+        # expect build_v9 to draw a real table from a ``table_data`` extra.
+        # The donor route only carries text slots, so the classifier's
+        # ``table`` block was silently dropped: build saw no table_data and
+        # kept the PNG-stub placeholder ("Столбец 1…/Строка 1…/+" — live dl1
+        # slide 4 "DNS Resolvers"). Convert the classifier TableConfig
+        # (headers + data) into the list-of-rows build_v9 wants so the stub is
+        # stripped and a branded table renders in its place.
+        if ps.clone_from_slide is not None:
+            donor_def = donor_map._load().get(int(ps.clone_from_slide)) or {}
+            is_table_donor = bool(donor_def.get("remove_if_user_provides_table")) or (
+                donor_def.get("donor_type") == "fixed_png_content"
+                and str(donor_def.get("category", "")).startswith("table")
+            )
+            tbl = cls.get("table") if isinstance(cls.get("table"), dict) else None
+            if is_table_donor and tbl:
+                headers = [str(h) for h in (tbl.get("headers") or [])]
+                rows = [
+                    [str(c) for c in r]
+                    for r in (tbl.get("data") or [])
+                    if isinstance(r, list)
+                ]
+                if headers and rows:
+                    ps_dump = ps.model_dump()
+                    ps_dump["table_data"] = [headers] + rows
+                    ps = PlanSlide.model_validate(ps_dump)
+                    logger.info("node.assemble.donor_table_data",
+                                session_id=state.session_id, num=num,
+                                donor=int(ps.clone_from_slide),
+                                rows=len(rows) + 1, cols=len(headers))
+            elif is_table_donor:
+                logger.warning("node.assemble.donor_table_no_data",
+                               session_id=state.session_id, num=num,
+                               donor=int(ps.clone_from_slide))
+
         # Attach Agent 06 infographic shapes for slides where they apply.
         info = info_by_num.get(num) or {}
         info_type = info.get("infographic_type")
@@ -499,6 +535,21 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
 
     plan = Plan(slides=plan_slides)
     arts["plan"] = plan.model_dump()
+    # Debug artefacts (2026-06-06): persist brief + classification next to
+    # plan.json so donor-table / coercion regressions can be diagnosed offline
+    # without re-running the LLM pipeline.
+    try:
+        import json as _dbg_json
+        _wd = _session_workdir(state.session_id)
+        _wd.mkdir(parents=True, exist_ok=True)
+        (_wd / "brief.json").write_text(
+            _dbg_json.dumps(arts.get("brief") or {}, ensure_ascii=False),
+            encoding="utf-8")
+        (_wd / "classification.json").write_text(
+            _dbg_json.dumps(arts.get("classification") or {}, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception as _dbg_e:  # noqa: BLE001
+        logger.warning("node.assemble.debug_dump_failed", error=str(_dbg_e))
     logger.info(
         "node.assemble.done",
         session_id=state.session_id,

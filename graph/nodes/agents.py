@@ -165,6 +165,78 @@ def _coerce_overflow_kpis(classification_dump: dict[str, Any]) -> int:
     return coerced
 
 
+def _inject_parsed_tables(
+    classification_dump: dict[str, Any],
+    parsed_deck: dict[str, Any],
+) -> int:
+    """Force ``table_native`` with REAL cell data for slides whose source
+    .pptx slide held a regular table.
+
+    ``parse_pptx`` extracts the table grid, but the LLM brief→classify chain
+    loses the cell text: Kimi marks ``intent=table`` with empty ``raw_body``,
+    so the classifier defaults to ``category=text`` with no ``table`` block.
+    Build then falls back to the donor-53 PNG-stub placeholder
+    ("Столбец 1…/Строка 1…/+" — live dl1 slide 4 "DNS Resolvers"). Here we
+    deterministically restore the table from the parsed grid so
+    ``table_renderer`` draws the actual branded zebra table.
+
+    Only regular tables (≥3 cols, uniform width, no merged cells) are
+    injected; irregular/merged tables are left to the LLM (anti-distortion).
+    Native types the classifier deliberately chose (kpi/chart/flow/image) and
+    split parts are never overridden.
+
+    Mutates in place. Returns the count of slides injected.
+    """
+    parsed_by_num: dict[int, dict[str, Any]] = {}
+    for ps in (parsed_deck.get("slides") or []):
+        n = ps.get("num")
+        if not isinstance(n, int):
+            continue
+        tbls = [
+            t for t in (ps.get("tables") or [])
+            if t.get("regular") and len(t.get("headers") or []) >= 3
+        ]
+        if tbls:
+            parsed_by_num[n] = {"grid": tbls[0], "title": ps.get("title") or ""}
+    if not parsed_by_num:
+        return 0
+
+    injected = 0
+    for s in classification_dump.get("slides") or []:
+        src = s.get("_source_slide") or s.get("num")
+        if not isinstance(src, int):
+            continue
+        entry = parsed_by_num.get(src)
+        if not entry:
+            continue
+        if s.get("slide_type") in (
+            "kpi_native", "chart_pptx_native",
+            "flow_diagram_native", "image_native",
+        ):
+            continue
+        if s.get("_split_part"):
+            continue
+        grid = entry["grid"]
+        headers = [str(h) for h in (grid.get("headers") or [])]
+        rows = [[str(c) for c in r] for r in (grid.get("rows") or [])]
+        if not headers or not rows:
+            continue
+        prev = s.get("table") if isinstance(s.get("table"), dict) else {}
+        header_txt = (prev.get("header") or entry["title"] or "").strip()
+        s["slide_type"] = "table_native"
+        s["category"] = "table"
+        s["table"] = {
+            "header": header_txt,
+            "subtitle": prev.get("subtitle", ""),
+            "style": "zebra",
+            "headers": headers,
+            "data": rows,
+            "first_col_wider": True,
+        }
+        injected += 1
+    return injected
+
+
 def classify_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.CLASSIFYING, pct=25, detail="классификация слайдов")
     arts = _artefacts(state)
@@ -178,7 +250,15 @@ def classify_node(state: SessionState) -> dict[str, Any]:
     classification_dump = classification.model_dump()
     thin_tables = _coerce_thin_tables(classification_dump)
     overflow_kpis = _coerce_overflow_kpis(classification_dump)
+    injected_tables = _inject_parsed_tables(
+        classification_dump, arts.get("parsed_deck") or {})
     arts["classification"] = classification_dump
+    if injected_tables:
+        logger.info(
+            "node.classify.parsed_tables_injected",
+            session_id=state.session_id,
+            count=injected_tables,
+        )
     if thin_tables:
         logger.warning(
             "node.classify.thin_tables_coerced",
@@ -194,7 +274,8 @@ def classify_node(state: SessionState) -> dict[str, Any]:
     logger.info("node.classify.done", session_id=state.session_id,
                 slides=len(classification.slides),
                 thin_tables_coerced=thin_tables,
-                overflow_kpis_coerced=overflow_kpis)
+                overflow_kpis_coerced=overflow_kpis,
+                parsed_tables_injected=injected_tables)
     return {"artefacts": arts, "stage": Stage.CLASSIFYING.value, "progress_pct": 30}
 
 

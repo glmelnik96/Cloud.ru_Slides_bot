@@ -68,6 +68,7 @@ donors:
   6:
     category: title_dark_alt
     description: "Альтернативный ТЁМНЫЙ титул (donor #6 = 'Титул / Чёрный 1'), белый текст на тёмном"
+    remove_before_fill: [2]   # strip baked-in stale date TextBox "18.03.2025" — no date slot is ever provided, so it always leaks a wrong, wrapping date
     slots:
       title:    { shape_idx: 1, size_pt: 60, max_chars: 80, safe_max_chars: 55, canonical_color: "#FFFFFF" }
       subtitle: { shape_idx: 0, size_pt: 20, max_chars: 100, safe_max_chars: 70, canonical_color: "#FFFFFF" }
@@ -343,6 +344,14 @@ donors:
   62:
     category: divider_green_with_caption
     description: "Зелёный divider с описанием снизу — альтернатива donor 12"
+    # Эталонный слайд 62 = инструктивный «Гайд по оформлению схем»: справа
+    # baked-in группа со списком «Слайд 65…» (shape 2) + подчёркивающая линия
+    # (shape 3). Это шаблонный мусор — всегда удаляем, иначе он протекает в
+    # вывод (dl2 slide-19 leak). Остаются только title + caption.
+    remove_before_fill: [2, 3]
+    # caption-карточка (shape 1) = белый прямоугольник. Если Distributor не дал
+    # текст caption — убираем пустую белую карточку, а не оставляем заглушку.
+    remove_if_slot_empty: { caption: 1 }
     slots:
       title: { shape_idx: 0, size_pt: 54, color: "#222222", max_chars: 40, safe_max_chars: 30, canonical_color: "#222222" }
       caption: { shape_idx: 1, size_pt: 20, color: "#222222", max_chars: 200, safe_max_chars: 140, canonical_color: "#222222" }

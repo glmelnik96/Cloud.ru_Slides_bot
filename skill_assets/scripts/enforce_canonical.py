@@ -155,7 +155,13 @@ def _set_semibold(rPr):
 
 
 def _iter_text_shapes(shapes):
-    """Рекурсивно: (shape, [runs]) для всех текстовых фигур, групп и ячеек таблиц."""
+    """Рекурсивно: (shape, [runs], is_cell) для текстовых фигур, групп и ячеек.
+
+    is_cell=True для ячеек native-таблиц — их шрифт уже подобран table_renderer'ом
+    под safe-area (вплоть до 8pt для плотных справочных таблиц). Бамп размера
+    таких ячеек до min_pt раздул бы таблицу за пределы слайда, поэтому caller
+    пропускает изменение размера для ячеек.
+    """
     for sh in shapes:
         st = sh.shape_type
         if st == 6:  # GROUP
@@ -169,12 +175,12 @@ def _iter_text_shapes(shapes):
                 for cell in row.cells:
                     runs = [r for p in cell.text_frame.paragraphs for r in p.runs]
                     if runs:
-                        yield (cell, runs)
+                        yield (cell, runs, True)
             continue
         if sh.has_text_frame:
             runs = [r for p in sh.text_frame.paragraphs for r in p.runs]
             if runs:
-                yield (sh, runs)
+                yield (sh, runs, False)
 
 
 def strip_shape_effects(slide):
@@ -325,7 +331,7 @@ def enforce_canonical_slide(slide, dark=False, min_pt=12, bump_from=None, bump_t
     if normalize_header:
         if normalize_header_to_placeholder(slide, dark=dark):
             stats["header_norm"] = 1
-    for shape, runs in _iter_text_shapes(slide.shapes):
+    for shape, runs, is_cell in _iter_text_shapes(slide.shapes):
         fill_dark, fill_green = _fill_info(shape)
         dark_ctx = fill_dark or dark
         # Bump до 16pt — только в ШИРОКИХ боксах (body-блоки, где есть место).
@@ -357,8 +363,10 @@ def enforce_canonical_slide(slide, dark=False, min_pt=12, bump_from=None, bump_t
             if rPr.get("b") == "1":
                 _set_semibold(rPr); stats["bold"] += 1
             # --- размер ---
+            # Ячейки native-таблиц НЕ трогаем по размеру: table_renderer уже
+            # подобрал шрифт под safe-area, бамп раздул бы таблицу за слайд.
             sz = rPr.get("sz")
-            if sz is not None:
+            if sz is not None and not is_cell:
                 pt = int(sz) / 100.0
                 if pt < min_pt:
                     rPr.set("sz", str(int(min_pt * 100))); stats["size_min"] += 1
