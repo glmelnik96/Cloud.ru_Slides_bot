@@ -331,11 +331,12 @@ def add_block(slide, x, y, w, h, lines,
     tf.margin_top = Emu(12 * EMU)
     tf.margin_bottom = Emu(16 * EMU)
 
-    if font_sizes is None:
+    if not font_sizes:
         # Стандарт 16pt (Problem #5, 2026-05-29). Для плотных схем LLM задаёт
         # меньше через font_sizes, но не ниже 12pt (кроме крайней перегрузки).
+        # Пустой список трактуем как None — иначе font_sizes[-1] упадёт IndexError.
         font_sizes = [16] + [16] * max(0, len(lines) - 1)
-    if bolds is None:
+    if not bolds:
         bolds = [True] + [False] * max(0, len(lines) - 1)
 
     align_enum = {
