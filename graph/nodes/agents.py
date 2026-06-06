@@ -277,6 +277,9 @@ def _inject_visual_slides(
         if not ps:
             continue
         vk = ps.get("visual_kind")
+        # Override is unconditional (unlike _inject_parsed_tables, which yields
+        # to deliberate natives): visual_kind is authoritative ground truth and
+        # the lossy brief carried no usable signal for the classifier to act on.
         if vk in ("raster", "opaque"):
             img_path = ps.get("image_path")
             if not img_path:
