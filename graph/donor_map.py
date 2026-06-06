@@ -10,6 +10,7 @@ call (worker process) and re-parse only on explicit ``reload()``.
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -313,11 +314,33 @@ def body_slot_count(layout_idx: int) -> int:
     return len(body_ph_indices(layout_idx))
 
 
+_STEP_BODY_RE = re.compile(r"step\d+_body$")
+
+
+def is_timeline_donor(layout_idx: int) -> bool:
+    """True for variable-length roadmap donors (paired ``*_date`` +
+    ``stepN_body`` slots, e.g. donor 60).
+
+    Partial fill of such a donor is an intentional short roadmap, not a
+    sparse flat slide, so the sparse detector exempts them.
+    """
+    if not layout_idx:
+        return False
+    donor = _load().get(int(layout_idx))
+    if donor is None:
+        return False
+    names = list((donor.get("slots") or {}).keys())
+    has_dates = any(str(n).endswith("_date") for n in names)
+    has_steps = any(_STEP_BODY_RE.search(str(n)) for n in names)
+    return has_dates and has_steps
+
+
 __all__ = [
     "slot_specs_for_layouts",
     "slot_name_by_ph_idx",
     "body_ph_indices",
     "body_slot_count",
+    "is_timeline_donor",
     "reload",
     "valid_donor_ids",
     "category_equivalence",

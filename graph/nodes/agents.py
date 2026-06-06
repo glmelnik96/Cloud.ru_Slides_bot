@@ -370,7 +370,7 @@ def _inject_visual_slides(
 # is intentionally light or specialised — never a sparse "flat donor" case.
 _SPARSE_CATEGORIES = ("text", "multicolumn")
 _SPARSE_MIN_BODY_SLOTS = 3
-_SPARSE_FILL_RATIO = 0.50
+_SPARSE_THIN_WORDS = 2
 
 
 def _detect_sparse_slides(
@@ -378,12 +378,17 @@ def _detect_sparse_slides(
     layouts: dict[str, Any],
     content: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Flag text/multicolumn slides that fill <= half of their donor's body
-    slots — "lonely header over empty brand decoration".
+    """Flag flat-donor slides whose body slots carry trivially little text —
+    the "lonely header over empty brand decoration" case.
 
-    Telemetry-only (Phase 1): returns diagnostics, mutates nothing. Runs at
-    the end of ``distribute_node`` where both the chosen donor (capacity) and
-    the placed content (fill) are known. See spec §4.
+    Phase-2A signal is per-slot WORD volume, not occupancy: on real flat donors
+    the distributor fills every slot, so underfill shows up as a body slot with
+    <= ``_SPARSE_THIN_WORDS`` words (e.g. a 3-column donor holding 1–2 words per
+    column), even at full occupancy. Timeline donors (variable-length roadmaps)
+    are exempt — partial fill there is intentional. See spec §3–§4.
+
+    Telemetry-only: returns diagnostics, mutates nothing. Runs at the end of
+    ``distribute_node`` where both the chosen donor and placed content are known.
     """
     from graph import donor_map  # noqa: WPS433 — local import keeps cycle clear
 
@@ -410,20 +415,19 @@ def _detect_sparse_slides(
         total = donor_map.body_slot_count(layout_idx)
         if total < _SPARSE_MIN_BODY_SLOTS:
             continue
+        if donor_map.is_timeline_donor(layout_idx):  # roadmap — sparse by design
+            continue
         body_idxs = donor_map.body_ph_indices(layout_idx)
-        filled = 0
-        chars: list[int] = []
+        words_per_slot: list[int] = []
         for pa in (cs.get("placeholder_assignments") or []):
             ph = pa.get("ph_idx")
             if ph is None or int(ph) not in body_idxs:
                 continue
             text = (pa.get("content") or "").strip()
             if text:
-                filled += 1
-                chars.append(len(text))
-        ratio = filled / total if total else 0.0
-        sparse = (ratio <= _SPARSE_FILL_RATIO) or (total >= 4 and filled <= 2)
-        if not sparse:
+                words_per_slot.append(len(text.split()))
+        thin = sum(1 for w in words_per_slot if w <= _SPARSE_THIN_WORDS)
+        if thin == 0:
             continue
         out.append({
             "num": num,
@@ -431,10 +435,10 @@ def _detect_sparse_slides(
             "category": category,
             "layout_idx": layout_idx,
             "body_slots_total": total,
-            "body_slots_filled": filled,
-            "fill_ratio": round(ratio, 2),
-            "real_item_count": filled,  # alias of body_slots_filled; kept distinct for Phase-2 remedy API
-            "content_chars": chars,
+            "body_slots_filled": len(words_per_slot),
+            "body_words_per_slot": words_per_slot,
+            "thin_slot_count": thin,
+            "body_word_total": sum(words_per_slot),
         })
     return out
 
@@ -594,16 +598,16 @@ def distribute_node(state: SessionState) -> dict[str, Any]:
     sparse = _detect_sparse_slides(
         classification, layouts, arts["content"])
     if sparse:
-        # full diagnostic dicts — Phase-1 telemetry; Phase-2 can narrow the payload
+        # Phase-2A telemetry: thin flat-donor slides by per-slot word volume.
         logger.info(
-            "node.distribute.sparse_candidates",
+            "node.distribute.sparse_volume",
             session_id=state.session_id,
             count=len(sparse),
             slides=sparse,
         )
     logger.info("node.distribute.done", session_id=state.session_id,
                 slides=len(content.slides),
-                sparse_candidates=len(sparse))
+                thin_slides=len(sparse))
     return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 50}
 
 

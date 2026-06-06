@@ -5,7 +5,7 @@ counting can't silently drift if the slot map changes shape.
 """
 from __future__ import annotations
 
-from graph.donor_map import body_ph_indices, body_slot_count
+from graph.donor_map import body_ph_indices, body_slot_count, is_timeline_donor
 
 
 def test_body_slot_count_known_donors() -> None:
@@ -30,3 +30,15 @@ def test_body_ph_indices_match_count() -> None:
 
 def test_body_ph_indices_empty_for_native() -> None:
     assert body_ph_indices(0) == set()
+
+
+def test_is_timeline_donor() -> None:
+    # donor 60: step1_date/step1_body … step10_body — variable-length roadmap.
+    assert is_timeline_donor(60) is True
+    # flat multi-column donors are not timelines.
+    assert is_timeline_donor(34) is False
+    assert is_timeline_donor(33) is False
+    assert is_timeline_donor(29) is False
+    # native / unknown.
+    assert is_timeline_donor(0) is False
+    assert is_timeline_donor(999_999) is False
