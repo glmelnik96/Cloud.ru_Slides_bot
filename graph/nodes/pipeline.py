@@ -105,6 +105,36 @@ def _render_first_slide_png(pptx_path: Path) -> str | None:
         return None
 
 
+def extract_images_extract(pptx_path, out_dir, manifest=None):
+    """Thin wrapper around the vendored extractor (monkeypatchable in tests)."""
+    skill_bridge.install()
+    import extract_images
+    return extract_images.extract(str(pptx_path), str(out_dir), manifest)
+
+
+def _media_prep_for_slide(pptx_path, slide_num, visual_kind, extract_dir, render_pngs):
+    """Return an image_path (str) for a raster/opaque slide, or None.
+
+    raster → largest extracted picture on that slide.
+    opaque → pre-rendered full-slide PNG from ``render_pngs`` (slide_num→path).
+    Falls through to None when nothing is available (caller logs WARN).
+    """
+    if visual_kind == "raster":
+        try:
+            manifest = extract_images_extract(pptx_path, extract_dir)
+        except Exception as e:
+            logger.warning("media_prep.extract_failed", slide=slide_num, error=str(e))
+            return None
+        imgs = [im for im in manifest.get("images", []) if im.get("slide_num") == slide_num]
+        if not imgs:
+            return None
+        best = max(imgs, key=lambda im: (im.get("width_px") or 0) * (im.get("height_px") or 0))
+        return str(Path(extract_dir) / best["file"])
+    if visual_kind == "opaque":
+        return render_pngs.get(slide_num)
+    return None
+
+
 # ─── parse_node ──────────────────────────────────────────────────────────────
 
 def parse_node(state: SessionState) -> dict[str, Any]:
