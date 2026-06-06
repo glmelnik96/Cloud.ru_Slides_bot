@@ -29,6 +29,7 @@ Output:
 import sys, json
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from visual_kind import classify_visual_kind
 
 
 def _walk_shapes(shapes, depth=0):
@@ -157,6 +158,35 @@ def parse(input_path):
                     line = " | ".join(v for v in r if v)
                     if line:
                         sdata["body"].append(line)
+
+        # --- group recovery: pull text + pictures buried inside GROUP shapes
+        leaves = _walk_shapes(slide.shapes)
+        group_nodes = []
+        order = 0
+        buried_text = []
+        for lf in leaves:
+            if lf["depth"] >= 1 and lf["text"]:
+                order += 1
+                group_nodes.append({
+                    "text": lf["text"],
+                    "left": lf["left"], "top": lf["top"],
+                    "w": lf["w"], "h": lf["h"],
+                    "order": order,
+                })
+                buried_text.append(lf["text"])
+            # pictures inside groups were missed by the top-level loop
+            if lf["depth"] >= 1 and lf["shape_type"] == MSO_SHAPE_TYPE.PICTURE:
+                sdata["images"].append({
+                    "name": "group_pic",
+                    "left_emu": lf["left"], "top_emu": lf["top"],
+                    "width_emu": lf["w"], "height_emu": lf["h"],
+                })
+        sdata["group_nodes"] = group_nodes
+        # classify BEFORE surfacing buried text into body, otherwise a structured
+        # diagram slide (no native title/body) would look like a normal text slide.
+        sdata["visual_kind"] = classify_visual_kind(sdata)
+        # now surface buried text to body so vision/LLM can see it
+        sdata["body"].extend(buried_text)
 
         result["slides"].append(sdata)
 

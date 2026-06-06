@@ -39,3 +39,17 @@ def test_walk_shapes_recurses_into_group_fixture():
     assert "Node A" in texts and "Node B" in texts and "Node C" in texts
     node_c = next(lf for lf in leaves if lf["text"] == "Node C")
     assert node_c["depth"] >= 2
+
+
+def test_parse_emits_visual_kind_and_group_nodes(tmp_path):
+    import os
+    from parse_pptx import parse
+    fixture = os.path.join(os.path.dirname(__file__), "..", "fixtures", "grouped_diagram.pptx")
+    result = parse(fixture)
+    s = result["slides"][0]
+    assert "visual_kind" in s
+    assert "group_nodes" in s
+    # The fixture has 3 grouped text nodes and no normal text → structured.
+    assert s["visual_kind"] == "structured"
+    assert len(s["group_nodes"]) == 3
+    assert all("order" in n and "text" in n for n in s["group_nodes"])
