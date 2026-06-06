@@ -13,6 +13,7 @@ import pytest
 class FakeRedis:
     def __init__(self):
         self.store: dict[str, str] = {}
+        self.lists: dict[str, list[str]] = {}
 
     def set(self, key, value, nx=False, ex=None):
         if nx and key in self.store:
@@ -30,6 +31,23 @@ class FakeRedis:
     def delete(self, key):
         return self.store.pop(key, None)
 
+    def rpush(self, key, value):
+        self.lists.setdefault(key, []).append(value)
+        return len(self.lists[key])
+
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+        return len(self.lists[key])
+
+    def lpop(self, key):
+        lst = self.lists.get(key)
+        if not lst:
+            return None
+        return lst.pop(0)
+
+    def llen(self, key):
+        return len(self.lists.get(key, []))
+
 
 @pytest.fixture
 def fake_redis(monkeypatch):
@@ -39,21 +57,54 @@ def fake_redis(monkeypatch):
     return fake
 
 
-def test_claim_user_lock_first_call_wins(fake_redis):
-    from bot.jobs import claim_user_lock
-    assert claim_user_lock(42, "sess-a") is True
-    assert claim_user_lock(42, "sess-b") is False
+def test_claim_global_lock_first_call_wins(fake_redis):
+    from bot.jobs import claim_global_lock
+    # One global run-slot: the first job wins, any other is rejected until free.
+    assert claim_global_lock("sess-a") is True
+    assert claim_global_lock("sess-b") is False
 
 
-def test_release_user_lock_only_if_owner(fake_redis):
-    from bot.jobs import claim_user_lock, get_active_session, release_user_lock
-    assert claim_user_lock(42, "sess-a") is True
+def test_release_global_lock_only_if_owner(fake_redis):
+    from bot.jobs import claim_global_lock, get_active_session, release_global_lock
+    assert claim_global_lock("sess-a") is True
     # Wrong session_id must not release the lock.
-    release_user_lock(42, "sess-other")
-    assert get_active_session(42) == "sess-a"
-    # Correct session_id releases it.
-    release_user_lock(42, "sess-a")
-    assert get_active_session(42) is None
+    release_global_lock("sess-other")
+    assert get_active_session() == "sess-a"
+    # Correct session_id releases it; a queued job can then claim.
+    release_global_lock("sess-a")
+    assert get_active_session() is None
+    assert claim_global_lock("sess-b") is True
+
+
+def test_enqueue_returns_position_and_dequeue_is_fifo(fake_redis):
+    from bot.jobs import dequeue_job, enqueue_job
+    assert enqueue_job({"session_id": "s1"}) == 1
+    assert enqueue_job({"session_id": "s2"}) == 2
+    assert enqueue_job({"session_id": "s3"}) == 3
+    # FIFO order out.
+    assert dequeue_job()["session_id"] == "s1"
+    assert dequeue_job()["session_id"] == "s2"
+    assert dequeue_job()["session_id"] == "s3"
+    assert dequeue_job() is None
+
+
+def test_enqueue_rejects_when_full(fake_redis):
+    from bot.jobs import QUEUE_MAX, enqueue_job, queue_length
+    for i in range(QUEUE_MAX):
+        assert enqueue_job({"session_id": f"s{i}"}) == i + 1
+    assert queue_length() == QUEUE_MAX
+    # Queue full → 0 (caller rejects the submission).
+    assert enqueue_job({"session_id": "overflow"}) == 0
+    assert queue_length() == QUEUE_MAX
+
+
+def test_requeue_front_is_lifo_head(fake_redis):
+    from bot.jobs import dequeue_job, enqueue_job, requeue_front
+    enqueue_job({"session_id": "tail"})
+    requeue_front({"session_id": "head"})
+    # requeue_front lands at the head — dispatched before the older tail entry.
+    assert dequeue_job()["session_id"] == "head"
+    assert dequeue_job()["session_id"] == "tail"
 
 
 def test_save_and_load_job_roundtrip(fake_redis):

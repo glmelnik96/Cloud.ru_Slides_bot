@@ -46,6 +46,9 @@ class SessionInput(BaseModel):
     mode: Mode
     # S3 key of the input artefact (pptx for verstai/audit, doc/docx for brief).
     input_s3_key: str | None = None
+    # Original upload filename (Telegram doc.file_name). Used to name the output
+    # file `{session_id}_{source}.pptx` so a deck can be tied back to its run.
+    source_filename: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -74,6 +77,7 @@ class SessionState(BaseModel):
 
     # Inputs / outputs
     input_s3_key: str | None = None
+    source_filename: str | None = None
     result_s3_key: str | None = None
     report_s3_key: str | None = None
 
@@ -104,6 +108,7 @@ class SessionState(BaseModel):
             mode=inp.mode.value,
             created_at_iso=inp.created_at.isoformat(),
             input_s3_key=inp.input_s3_key,
+            source_filename=inp.source_filename,
         )
 
 

@@ -15,6 +15,7 @@ tracked by inline FIXME(next-chunk) comments.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,23 @@ def _artefacts(state: SessionState) -> dict[str, Any]:
 
 def _emit(state: SessionState, stage: Stage, pct: int, detail: str) -> None:
     progress.stage(state.session_id, stage, pct=pct, detail=detail)
+
+
+# Anything that isn't a word char (Unicode-aware, so Cyrillic survives), dot,
+# or hyphen is collapsed to a single underscore in the output filename.
+_SAFE_NAME_RE = re.compile(r"[^\w.-]+", re.UNICODE)
+
+
+def _output_filename(session_id: str, source_filename: str | None) -> str:
+    """Name the built deck after its run ID, suffixed with the sanitised source
+    stem when available: ``{session_id}_{source}.pptx`` (falls back to
+    ``{session_id}.pptx``). Keeps a deck traceable to its run in logs/Telegram.
+    """
+    if source_filename:
+        stem = _SAFE_NAME_RE.sub("_", Path(source_filename).stem).strip("_")
+        if stem:
+            return f"{session_id}_{stem}.pptx"
+    return f"{session_id}.pptx"
 
 
 def _resolve_input_path(state: SessionState) -> Path | None:
@@ -727,7 +745,7 @@ def build_node(state: SessionState) -> dict[str, Any]:
 
     workdir = _session_workdir(state.session_id)
     plan_path = workdir / "plan.json"
-    out_path = workdir / "result.pptx"
+    out_path = workdir / _output_filename(state.session_id, state.source_filename)
     # Strip explicit nulls before handing off to vendored build_v9. Several
     # of its renderers do ``cfg.get("key", {})`` which only fires the default
     # when the key is *absent* — an explicit ``null`` (which Pydantic emits

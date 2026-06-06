@@ -17,11 +17,12 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from bot.handlers.progress import cancel_keyboard, start_subscriber
+from bot.handlers.progress import start_subscriber
 from bot.i18n.progress import format_progress
 from bot.i18n.ru import VERSTAI_BAD_TYPE, VERSTAI_NEED_FILE
-from bot.jobs import claim_user_lock, release_user_lock, save_job
+from bot.jobs import claim_global_lock, enqueue_job, release_global_lock, save_job
 from bot.middleware.whitelist import guarded
+from bot.queue_dispatch import make_on_terminal
 from schemas.session import Mode, SessionInput
 
 logger = structlog.get_logger(__name__)
@@ -90,25 +91,18 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # field. parse_node (graph/nodes/pipeline.py) treats a non-empty value
         # as a local path until S3 lands, so the field name doesn't churn.
         input_s3_key=None,
+        source_filename=doc.file_name,
     )
 
-    # Claim the single-task lock BEFORE the download so a double-tap doesn't
-    # trigger two Telegram fetches.
-    if not claim_user_lock(user.id, inp.session_id):
-        await update.message.reply_text(
-            "У вас уже идёт задача. Дождитесь её завершения или отмените."
-        )
-        return
-
-    # Download the .pptx before we enqueue — if Telegram throws we want to fail
-    # fast with a clear message instead of the worker discovering it later.
+    # Download the .pptx up front — a queued job needs its input on disk ready
+    # for whenever the run-slot frees up. If Telegram throws we fail fast with a
+    # clear message instead of the worker discovering it later.
     _INPUTS_ROOT.mkdir(parents=True, exist_ok=True)
     local_path = _INPUTS_ROOT / f"{inp.session_id}.pptx"
     try:
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(custom_path=str(local_path))
     except TelegramError as e:
-        release_user_lock(user.id, inp.session_id)
         logger.exception("verstai.download_failed", error=str(e),
                          session_id=inp.session_id, file_id=doc.file_id)
         await update.message.reply_text(
@@ -120,15 +114,40 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status_msg = await update.message.reply_text(
         format_progress("queued", 0, "ожидание воркера"),
         parse_mode=ParseMode.HTML,
-        reply_markup=cancel_keyboard(inp.session_id),
     )
     inp = inp.model_copy(update={"progress_message_id": status_msg.message_id})
+
+    # One global run-slot: if it's free we start immediately, otherwise the job
+    # waits its turn in the queue and is dispatched on the active job's terminal.
+    if not claim_global_lock(inp.session_id):
+        entry = {
+            "session_id": inp.session_id,
+            "user_id": user.id,
+            "chat_id": chat_id,
+            "message_id": status_msg.message_id,
+            "input_json": inp.model_dump(mode="json"),
+        }
+        position = enqueue_job(entry)
+        if position == 0:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=status_msg.message_id,
+                text="Очередь заполнена (максимум 10). Попробуйте позже.",
+            )
+            return
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=status_msg.message_id,
+            text=f"⏳ В очереди, позиция {position}. Начну, как освободится воркер.",
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info("verstai.queued", session_id=inp.session_id,
+                    user_id=user.id, position=position)
+        return
 
     try:
         from worker.tasks.pipeline import run_pipeline
         async_result = run_pipeline.delay(inp.model_dump(mode="json"))
     except Exception as e:  # noqa: BLE001
-        release_user_lock(user.id, inp.session_id)
+        release_global_lock(inp.session_id)
         logger.exception("verstai.enqueue_failed", error=str(e))
         await update.message.reply_text("Не удалось поставить задачу. Попробуйте позже.")
         return
@@ -142,16 +161,12 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         mode=inp.mode.value,
     )
 
-    async def _on_terminal(_event) -> None:
-        # Always free the single-task lock once the pipeline ends (done/failed/cancelled).
-        release_user_lock(user.id, inp.session_id)
-
     start_subscriber(
         context.application,
         session_id=inp.session_id,
         chat_id=chat_id,
         message_id=status_msg.message_id,
-        on_terminal=_on_terminal,
+        on_terminal=make_on_terminal(context.application),
     )
     logger.info(
         "verstai.enqueued",

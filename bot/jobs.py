@@ -1,7 +1,8 @@
 """Bot-side job registry: session_id ↔ (task_id, chat_id, message_id).
 
 Kept in Redis (DB.TG_STATE) so progress listeners surviving a bot restart
-can still find the active task. Single-task-per-user lock also lives here.
+can still find the active task. The global single-task lock and the pending
+job queue also live here.
 """
 from __future__ import annotations
 
@@ -14,41 +15,70 @@ from storage.redis_client import DB, sync_client
 
 logger = structlog.get_logger(__name__)
 
-# Hash key formats:
-#   job:{session_id}       — job metadata (chat_id, msg_id, task_id, user_id, mode, started_at)
-#   user_lock:{user_id}    — currently active session_id, or absent
+# Key formats:
+#   job:{session_id}    — job metadata (chat_id, msg_id, task_id, user_id, mode, started_at)
+#   global_job_lock     — session_id of the one job currently running, or absent
+#   global_job_queue    — LIST of JSON entries waiting for the lock to free
 
 _JOB_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days — matches session bundle TTL
+
+_LOCK_KEY = "global_job_lock"
+_QUEUE_KEY = "global_job_queue"
+# Cap the pending queue so a flood of uploads can't grow it unbounded.
+QUEUE_MAX = 10
 
 
 def _job_key(session_id: str) -> str:
     return f"job:{session_id}"
 
 
-def _lock_key(user_id: int) -> str:
-    return f"user_lock:{user_id}"
+def claim_global_lock(session_id: str) -> bool:
+    """Atomically claim the single global run-slot.
 
-
-def claim_user_lock(user_id: int, session_id: str) -> bool:
-    """Atomically claim the single-session lock for a user.
-
-    Returns True if the lock was acquired, False if the user already has an
-    active job. Lock auto-expires after the job TTL.
+    Returns True if the lock was acquired, False if another job already holds
+    it. The lock auto-expires after the job TTL as a stuck-job safety net.
     """
     r = sync_client(DB.TG_STATE)
-    return bool(r.set(_lock_key(user_id), session_id, nx=True, ex=_JOB_TTL_SECONDS))
+    return bool(r.set(_LOCK_KEY, session_id, nx=True, ex=_JOB_TTL_SECONDS))
 
 
-def get_active_session(user_id: int) -> str | None:
-    return sync_client(DB.TG_STATE).get(_lock_key(user_id))
+def get_active_session() -> str | None:
+    """session_id of the job currently holding the global lock, or None."""
+    return sync_client(DB.TG_STATE).get(_LOCK_KEY)
 
 
-def release_user_lock(user_id: int, session_id: str) -> None:
+def release_global_lock(session_id: str) -> None:
     """Release the lock only if it still points at *this* session."""
     r = sync_client(DB.TG_STATE)
-    current = r.get(_lock_key(user_id))
-    if current == session_id:
-        r.delete(_lock_key(user_id))
+    if r.get(_LOCK_KEY) == session_id:
+        r.delete(_LOCK_KEY)
+
+
+def enqueue_job(entry: dict) -> int:
+    """Append a pending-job entry to the tail of the queue.
+
+    Returns the entry's 1-based position in the queue, or 0 if the queue is
+    already at QUEUE_MAX (caller should reject the submission).
+    """
+    r = sync_client(DB.TG_STATE)
+    if r.llen(_QUEUE_KEY) >= QUEUE_MAX:
+        return 0
+    return int(r.rpush(_QUEUE_KEY, json.dumps(entry)))
+
+
+def dequeue_job() -> dict | None:
+    """Pop the oldest pending-job entry from the head of the queue."""
+    raw = sync_client(DB.TG_STATE).lpop(_QUEUE_KEY)
+    return json.loads(raw) if raw else None
+
+
+def requeue_front(entry: dict) -> None:
+    """Push an entry back to the head — used when a dispatch loses a lock race."""
+    sync_client(DB.TG_STATE).lpush(_QUEUE_KEY, json.dumps(entry))
+
+
+def queue_length() -> int:
+    return int(sync_client(DB.TG_STATE).llen(_QUEUE_KEY))
 
 
 def save_job(*, session_id: str, user_id: int, chat_id: int,

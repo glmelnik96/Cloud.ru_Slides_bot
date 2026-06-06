@@ -10,8 +10,9 @@ from telegram.ext import ContextTypes
 
 from bot.handlers.progress import start_subscriber
 from bot.i18n.progress import format_progress
-from bot.jobs import claim_user_lock, load_job, release_user_lock, save_job, update_job_task_id
+from bot.jobs import claim_global_lock, load_job, save_job, update_job_task_id
 from bot.middleware.whitelist import guarded
+from bot.queue_dispatch import make_on_terminal
 
 logger = structlog.get_logger(__name__)
 
@@ -35,9 +36,9 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Эта сессия принадлежит другому пользователю.")
         return
 
-    if not claim_user_lock(update.effective_user.id, session_id):
+    if not claim_global_lock(session_id):
         await update.message.reply_text(
-            "У вас уже идёт другая задача. Отмените её перед возобновлением."
+            "Сейчас выполняется другая задача. Дождитесь её завершения перед возобновлением."
         )
         return
 
@@ -58,14 +59,11 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         task_id=async_result.id,
         mode=job["mode"],
     )
-    async def _on_terminal(_event) -> None:
-        release_user_lock(update.effective_user.id, session_id)
-
     start_subscriber(
         context.application,
         session_id=session_id,
         chat_id=chat_id,
         message_id=status_msg.message_id,
-        on_terminal=_on_terminal,
+        on_terminal=make_on_terminal(context.application),
     )
     logger.info("resume.enqueued", session_id=session_id, task_id=async_result.id)
