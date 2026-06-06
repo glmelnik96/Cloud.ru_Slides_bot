@@ -213,20 +213,54 @@ def parse_node(state: SessionState) -> dict[str, Any]:
     deck = ParsedDeck.model_validate(raw)
     arts["parsed_deck"] = deck.model_dump()
 
-    png = _render_first_slide_png(path)
-    if png is not None:
-        arts["original_pngs"] = [png]
+    slides = deck.model_dump().get("slides", [])
+    visual_nums = [s["num"] for s in slides
+                   if s.get("visual_kind") in ("raster", "opaque")]
+
+    render_pngs = {}
+    if visual_nums:
+        render_pngs = _render_all_slides_png(path)
+
+    # Grounding: slide 1 always; plus every visual slide we rendered.
+    grounding = []
+    first = _render_first_slide_png(path)
+    if first is not None:
+        grounding.append(first)
+    for n in visual_nums:
+        p = render_pngs.get(n)
+        if p and p not in grounding:
+            grounding.append(p)
+    if grounding:
+        arts["original_pngs"] = grounding
     else:
-        # Leave the key unset — brief_node already falls back to a 1×1
-        # placeholder when 'original_pngs' is absent.
         arts.pop("original_pngs", None)
+
+    # Resolve image_path per visual slide and stitch it back into parsed_deck.
+    extract_dir = Path(tempfile.mkdtemp(prefix="slidesbot_extract_"))
+    pd = arts["parsed_deck"]
+    for s in pd.get("slides", []):
+        vk = s.get("visual_kind")
+        if vk not in ("raster", "opaque"):
+            continue
+        img_path = _media_prep_for_slide(
+            pptx_path=path, slide_num=s["num"], visual_kind=vk,
+            extract_dir=extract_dir, render_pngs=render_pngs,
+        )
+        if img_path:
+            s["image_path"] = img_path
+            logger.info("node.parse.visual_route", slide=s["num"],
+                        kind=vk, route=("image_a" if vk == "raster" else "image_b"),
+                        image_path=img_path)
+        else:
+            logger.warning("node.parse.no_image", slide=s["num"], kind=vk)
+    arts["parsed_deck"] = pd
 
     logger.info(
         "node.parse.done",
         session_id=state.session_id,
         path=str(path),
         slide_count=deck.slide_count,
-        grounded=png is not None,
+        grounded=bool(grounding),
     )
     return {"artefacts": arts, "stage": Stage.PARSING.value, "progress_pct": 10}
 
