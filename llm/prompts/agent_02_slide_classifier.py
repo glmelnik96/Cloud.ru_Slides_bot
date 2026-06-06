@@ -39,6 +39,7 @@ SYSTEM = f"""\
 }}
 
 ПРАВИЛО МАППИНГА intent → category (применяй сначала):
+- ВИЗУАЛЬНЫЕ СЛАЙДЫ (если в данных есть visual_kind): structured → flow_diagram_native, flow.preset="card_grid", category=other (узлы группы → cards). raster|opaque → image_native (image_path уже в данных), category=image. Детерминированная пост-обработка всё равно проставит image_path/flow из исходника — не выдумывай путь.
 - title → title
 - divider → divider
 - text (1–2 блока, 1-2 предложения) → text

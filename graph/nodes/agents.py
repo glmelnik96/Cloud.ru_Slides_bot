@@ -237,6 +237,90 @@ def _inject_parsed_tables(
     return injected
 
 
+def _inject_visual_slides(
+    classification_dump: dict[str, Any],
+    parsed_deck: dict[str, Any],
+) -> dict[str, int]:
+    """Deterministically route visual slides the LLM brief→classify chain
+    can't handle, using ``parsed_deck`` as source of truth.
+
+    The brief is LLM-generated and lossy: ``image_path`` (a local temp path)
+    and ``group_nodes`` never survive into it, so the classifier cannot route
+    these slides itself (mirrors ``_inject_parsed_tables``).
+
+    * raster/opaque slide with a resolved ``image_path`` → force
+      ``image_native`` carrying that path (else build skips it → slide drop).
+    * structured slide (>=3 grouped text nodes) → rebuild as
+      ``flow_diagram_native`` / ``card_grid`` from ``group_nodes`` — a branded
+      native diagram instead of a flat text slide.
+
+    Split parts (``_split_part``) are never touched. Mutates in place.
+    Returns {"image": n, "flow": n}.
+    """
+    parsed_by_num: dict[int, dict[str, Any]] = {}
+    for ps in (parsed_deck.get("slides") or []):
+        n = ps.get("num")
+        if isinstance(n, int) and ps.get("visual_kind") in ("raster", "opaque", "structured"):
+            parsed_by_num[n] = ps
+    if not parsed_by_num:
+        return {"image": 0, "flow": 0}
+
+    img_n = 0
+    flow_n = 0
+    for s in classification_dump.get("slides") or []:
+        if s.get("_split_part"):
+            continue
+        src = s.get("_source_slide") or s.get("num")
+        if not isinstance(src, int):
+            continue
+        ps = parsed_by_num.get(src)
+        if not ps:
+            continue
+        vk = ps.get("visual_kind")
+        if vk in ("raster", "opaque"):
+            img_path = ps.get("image_path")
+            if not img_path:
+                continue  # no image available → leave as-is (logged downstream)
+            prev = s.get("image") if isinstance(s.get("image"), dict) else {}
+            title = (prev.get("title") or ps.get("title") or "").strip()
+            s["slide_type"] = "image_native"
+            s["category"] = "image"
+            s["image"] = {
+                "title": title,
+                "image_path": img_path,
+                "caption": prev.get("caption") or "",
+                "subcategory": prev.get("subcategory") or "diagram",
+                "frame": prev.get("frame"),
+            }
+            for k in ("kpi", "chart", "table", "flow"):
+                s[k] = None
+            img_n += 1
+        elif vk == "structured":
+            nodes = [gn for gn in (ps.get("group_nodes") or [])
+                     if str(gn.get("text", "")).strip()]
+            if len(nodes) < 3:
+                continue
+            nodes = sorted(nodes, key=lambda x: x.get("order", 0))
+            cards = [{"title": str(gn.get("text", "")).strip(), "text": ""}
+                     for gn in nodes]
+            ncards = len(cards)
+            cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
+            prev = s.get("flow") if isinstance(s.get("flow"), dict) else {}
+            header = (prev.get("header") or ps.get("title") or "").strip()
+            s["slide_type"] = "flow_diagram_native"
+            s["category"] = "other"
+            s["flow"] = {
+                "header": header, "subtitle": "", "preset": "card_grid",
+                "cards": cards, "columns": [], "rows": [],
+                "statement": "", "support": "", "grid": False, "cols": cols,
+                "blocks": [], "arrows": [],
+            }
+            for k in ("kpi", "chart", "table", "image"):
+                s[k] = None
+            flow_n += 1
+    return {"image": img_n, "flow": flow_n}
+
+
 def classify_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.CLASSIFYING, pct=25, detail="классификация слайдов")
     arts = _artefacts(state)
@@ -252,12 +336,21 @@ def classify_node(state: SessionState) -> dict[str, Any]:
     overflow_kpis = _coerce_overflow_kpis(classification_dump)
     injected_tables = _inject_parsed_tables(
         classification_dump, arts.get("parsed_deck") or {})
+    visual_routed = _inject_visual_slides(
+        classification_dump, arts.get("parsed_deck") or {})
     arts["classification"] = classification_dump
     if injected_tables:
         logger.info(
             "node.classify.parsed_tables_injected",
             session_id=state.session_id,
             count=injected_tables,
+        )
+    if visual_routed["image"] or visual_routed["flow"]:
+        logger.info(
+            "node.classify.visual_slides_routed",
+            session_id=state.session_id,
+            image=visual_routed["image"],
+            flow=visual_routed["flow"],
         )
     if thin_tables:
         logger.warning(
@@ -275,7 +368,9 @@ def classify_node(state: SessionState) -> dict[str, Any]:
                 slides=len(classification.slides),
                 thin_tables_coerced=thin_tables,
                 overflow_kpis_coerced=overflow_kpis,
-                parsed_tables_injected=injected_tables)
+                parsed_tables_injected=injected_tables,
+                visual_image_routed=visual_routed["image"],
+                visual_flow_routed=visual_routed["flow"])
     return {"artefacts": arts, "stage": Stage.CLASSIFYING.value, "progress_pct": 30}
 
 
