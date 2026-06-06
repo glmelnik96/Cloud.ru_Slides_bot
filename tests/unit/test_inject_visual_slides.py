@@ -1,7 +1,7 @@
 """Deterministic visual-slide routing in classify_node."""
 from __future__ import annotations
 
-from graph.nodes.agents import _inject_visual_slides
+from graph.nodes.agents import _cards_from_group_nodes, _inject_visual_slides
 
 
 def _cls(slides):
@@ -48,6 +48,42 @@ def test_structured_builds_card_grid_from_group_nodes():
     assert s["flow"]["preset"] == "card_grid"
     assert [c["title"] for c in s["flow"]["cards"]] == ["Шаг 1", "Шаг 2", "Шаг 3"]
     assert s["flow"]["cols"] == 2
+
+
+def test_marker_nodes_dropped_and_label_body_split():
+    # Mirrors real dl2 numbered diagrams: content nodes alternate with bare
+    # marker badges; content packs label + description on a blank-line break.
+    parsed = {"slides": [
+        {"num": 18, "visual_kind": "structured", "title": "Три типа промптов",
+         "group_nodes": [
+             {"text": "РОЛЬ\n\nЗадаёт роль senior разработчика", "order": 1},
+             {"text": "1", "order": 2},
+             {"text": "ГЕНЕРАЦИЯ\x0bBOILERPLATE\n\nГенерация кода через CLI", "order": 3},
+             {"text": "2.", "order": 4},
+             {"text": "ПРОВЕРКИ КАЧЕСТВА\n\nЗапуск сборки и линтеров", "order": 5},
+             {"text": "3)", "order": 6},
+         ]},
+    ]}
+    cls = _cls([{"num": 18, "slide_type": None, "flow": None}])
+    counts = _inject_visual_slides(cls, parsed)
+    assert counts["flow"] == 1
+    cards = cls["slides"][0]["flow"]["cards"]
+    assert [c["title"] for c in cards] == ["РОЛЬ", "ГЕНЕРАЦИЯ BOILERPLATE", "ПРОВЕРКИ КАЧЕСТВА"]
+    assert cards[0]["text"] == "Задаёт роль senior разработчика"
+    assert cards[1]["text"] == "Генерация кода через CLI"
+
+
+def test_cards_from_group_nodes_helper():
+    nodes = [
+        {"text": "Альфа", "order": 2},
+        {"text": "7", "order": 1},  # marker dropped despite earlier order
+        {"text": "Бета\n\nописание", "order": 3},
+    ]
+    cards = _cards_from_group_nodes(nodes)
+    assert cards == [
+        {"title": "Альфа", "text": ""},
+        {"title": "Бета", "text": "описание"},
+    ]
 
 
 def test_split_part_is_never_touched():

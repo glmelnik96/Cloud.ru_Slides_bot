@@ -237,6 +237,31 @@ def _inject_parsed_tables(
     return injected
 
 
+_MARKER_RE = re.compile(r"^\s*[\d]{1,2}\s*[.)]?\s*$")
+
+
+def _cards_from_group_nodes(group_nodes: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Build card_grid cards from a structured slide's grouped text nodes.
+
+    Source numbered diagrams alternate content nodes with standalone marker
+    badges ("1", "2."): those markers carry no content and must not become
+    their own cards. Content nodes often pack a label and a description
+    separated by a blank line / vertical-tab; split them into card title+text.
+    """
+    cards: list[dict[str, str]] = []
+    for gn in sorted(group_nodes, key=lambda x: x.get("order", 0)):
+        raw = str(gn.get("text", "")).strip()
+        if not raw or _MARKER_RE.match(raw):
+            continue
+        # normalise vertical-tab soft breaks, then split label/description
+        norm = raw.replace("\x0b", " ")
+        parts = re.split(r"\n\s*\n", norm, maxsplit=1)
+        title = " ".join(parts[0].split())
+        body = " ".join(parts[1].split()) if len(parts) > 1 else ""
+        cards.append({"title": title, "text": body})
+    return cards
+
+
 def _inject_visual_slides(
     classification_dump: dict[str, Any],
     parsed_deck: dict[str, Any],
@@ -299,13 +324,9 @@ def _inject_visual_slides(
                 s[k] = None
             img_n += 1
         elif vk == "structured":
-            nodes = [gn for gn in (ps.get("group_nodes") or [])
-                     if str(gn.get("text", "")).strip()]
-            if len(nodes) < 3:
-                continue
-            nodes = sorted(nodes, key=lambda x: x.get("order", 0))
-            cards = [{"title": str(gn.get("text", "")).strip(), "text": ""}
-                     for gn in nodes]
+            cards = _cards_from_group_nodes(ps.get("group_nodes") or [])
+            if len(cards) < 3:
+                continue  # markers stripped → too few real cards; leave as text
             ncards = len(cards)
             cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
             prev = s.get("flow") if isinstance(s.get("flow"), dict) else {}
