@@ -96,11 +96,23 @@ def test_long_title_shrinks(tmp_workdir) -> None:
 def test_extreme_title_hits_70pct_floor(tmp_workdir) -> None:
     """For very long titles the linear scale clamps at 70% of base.
 
-    Without the floor we'd land at unreadable sub-14pt sizes.
+    Without the floor we'd land at unreadable sub-14pt sizes. Uses a long
+    but word-breakable title so the linear floor (not the mid-word-break
+    guard) is the binding constraint.
     """
-    extreme = "x" * 300
+    extreme = ("Облако " * 50).strip()  # ~349 chars, short breakable words
+    assert len(extreme) > 55 * 2
     out = _build_with_title(tmp_workdir, extreme)
     size = _read_title_run_size_pt(out)
     assert size is not None
     # 70% × 60pt = 42pt — should not go below that.
     assert size >= 42.0 - 0.5
+
+
+def test_single_unbreakable_word_shrinks_below_linear_floor(tmp_workdir) -> None:
+    """A single very long word can't break, so the mid-word-break guard is
+    allowed to shrink past the 70% linear floor to keep it on one line."""
+    out = _build_with_title(tmp_workdir, "x" * 300)
+    size = _read_title_run_size_pt(out)
+    assert size is not None
+    assert size < 42.0  # below the linear floor, by design
