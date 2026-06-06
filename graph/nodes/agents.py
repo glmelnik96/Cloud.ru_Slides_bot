@@ -262,6 +262,28 @@ def _cards_from_group_nodes(group_nodes: list[dict[str, Any]]) -> list[dict[str,
     return cards
 
 
+def _force_image_native(s: dict[str, Any], title: str, img_path: str,
+                        prev: dict[str, Any] | None = None) -> None:
+    """Rewrite a classification slide as an ``image_native`` carrying ``img_path``.
+
+    ``prev`` is the slide's existing image block, if any — its caption/
+    subcategory/frame are preserved (so genuine screenshots keep their browser
+    chrome). When absent (structured B-fallback) the render is a plain diagram.
+    """
+    prev = prev or {}
+    s["slide_type"] = "image_native"
+    s["category"] = "image"
+    s["image"] = {
+        "title": title,
+        "image_path": img_path,
+        "caption": prev.get("caption") or "",
+        "subcategory": prev.get("subcategory") or "diagram",
+        "frame": prev.get("frame"),
+    }
+    for k in ("kpi", "chart", "table", "flow"):
+        s[k] = None
+
+
 def _inject_visual_slides(
     classification_dump: dict[str, Any],
     parsed_deck: dict[str, Any],
@@ -311,22 +333,20 @@ def _inject_visual_slides(
                 continue  # no image available → leave as-is (logged downstream)
             prev = s.get("image") if isinstance(s.get("image"), dict) else {}
             title = (prev.get("title") or ps.get("title") or "").strip()
-            s["slide_type"] = "image_native"
-            s["category"] = "image"
-            s["image"] = {
-                "title": title,
-                "image_path": img_path,
-                "caption": prev.get("caption") or "",
-                "subcategory": prev.get("subcategory") or "diagram",
-                "frame": prev.get("frame"),
-            }
-            for k in ("kpi", "chart", "table", "flow"):
-                s[k] = None
+            _force_image_native(s, title, img_path, prev)
             img_n += 1
         elif vk == "structured":
             cards = _cards_from_group_nodes(ps.get("group_nodes") or [])
             if len(cards) < 3:
-                continue  # markers stripped → too few real cards; leave as text
+                # Reconstruction too sparse (e.g. group was mostly marker
+                # badges) → B-fallback to the full-slide render so the slide
+                # is never dropped (design §5). Stays a flat text slide only
+                # if no render was stashed.
+                fb = ps.get("image_path")
+                if fb:
+                    _force_image_native(s, (ps.get("title") or "").strip(), fb)
+                    img_n += 1
+                continue
             ncards = len(cards)
             cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
             prev = s.get("flow") if isinstance(s.get("flow"), dict) else {}

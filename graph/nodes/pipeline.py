@@ -217,21 +217,27 @@ def parse_node(state: SessionState) -> dict[str, Any]:
     arts["parsed_deck"] = deck.model_dump()
 
     slides = deck.model_dump().get("slides", [])
-    visual_nums = [s["num"] for s in slides
+    # raster/opaque ground the Brief Reader vision pass. structured slides also
+    # get a rendered full-slide PNG stashed as a B-fallback (used by the
+    # classifier injector only when native reconstruction yields too few
+    # cards) so no visual slide can ever drop — design §5 fallback chain.
+    ground_nums = [s["num"] for s in slides
                    if s.get("visual_kind") in ("raster", "opaque")]
+    render_nums = ground_nums + [s["num"] for s in slides
+                                 if s.get("visual_kind") == "structured"]
 
     render_pngs = {}
-    if visual_nums:
+    if render_nums:
         render_pngs = _render_all_slides_png(path)
 
-    # Grounding: slide 1 always; plus every visual slide we rendered.
+    # Grounding: slide 1 always; plus every raster/opaque slide we rendered.
     # Reuse slide 1 from the full render when we already paid for it — avoids
     # a second full-deck LibreOffice pass on visual decks.
     grounding = []
     first = render_pngs.get(1) or _render_first_slide_png(path)
     if first is not None:
         grounding.append(first)
-    for n in visual_nums:
+    for n in ground_nums:
         p = render_pngs.get(n)
         if p and p not in grounding:
             grounding.append(p)
@@ -250,6 +256,14 @@ def parse_node(state: SessionState) -> dict[str, Any]:
     pd = arts["parsed_deck"]
     for s in pd.get("slides", []):
         vk = s.get("visual_kind")
+        if vk == "structured":
+            # Stash the rendered full slide as a silent B-fallback; the
+            # classifier injector prefers native flow and only uses this when
+            # the group nodes can't fill a card grid.
+            fb = render_pngs.get(s["num"])
+            if fb:
+                s["image_path"] = fb
+            continue
         if vk not in ("raster", "opaque"):
             continue
         img_path = _media_prep_for_slide(

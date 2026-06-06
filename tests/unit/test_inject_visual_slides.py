@@ -86,6 +86,42 @@ def test_cards_from_group_nodes_helper():
     ]
 
 
+def test_structured_too_few_cards_falls_back_to_render():
+    # 3 nodes classify as structured, but two are bare markers → 1 real card.
+    # A rendered B-fallback PNG was stashed → degrade to image_native, not drop.
+    parsed = {"slides": [
+        {"num": 7, "visual_kind": "structured", "title": "Схема",
+         "image_path": "/tmp/x/slide-07.png",
+         "group_nodes": [
+             {"text": "Единственный пункт", "order": 1},
+             {"text": "1", "order": 2},
+             {"text": "2", "order": 3},
+         ]},
+    ]}
+    cls = _cls([{"num": 7, "slide_type": None, "flow": None, "image": None}])
+    counts = _inject_visual_slides(cls, parsed)
+    assert counts == {"image": 1, "flow": 0}
+    s = cls["slides"][0]
+    assert s["slide_type"] == "image_native"
+    assert s["image"]["image_path"] == "/tmp/x/slide-07.png"
+    assert s["image"]["frame"] is None and s["image"]["subcategory"] == "diagram"
+
+
+def test_structured_too_few_cards_no_render_left_as_text():
+    parsed = {"slides": [
+        {"num": 7, "visual_kind": "structured", "title": "Схема",
+         "group_nodes": [
+             {"text": "Единственный пункт", "order": 1},
+             {"text": "1", "order": 2},
+             {"text": "2", "order": 3},
+         ]},
+    ]}  # no image_path stashed
+    cls = _cls([{"num": 7, "slide_type": None, "flow": None}])
+    counts = _inject_visual_slides(cls, parsed)
+    assert counts == {"image": 0, "flow": 0}
+    assert cls["slides"][0]["slide_type"] is None
+
+
 def test_split_part_is_never_touched():
     parsed = {"slides": [{"num": 3, "visual_kind": "raster",
                           "image_path": "/tmp/x.png"}]}
