@@ -105,14 +105,15 @@ def _render_first_slide_png(pptx_path: Path) -> str | None:
         return None
 
 
-def _render_all_slides_png(pptx_path):
+def _render_all_slides_png(pptx_path: Path) -> dict[int, str]:
     """Render every slide to PNG via render_slides.py. Returns {slide_num: path}.
 
     Empty dict if soffice/pdftoppm unavailable (caller degrades). Output files
     are named slide-01.png, slide-02.png, … (1-based) by the vendored script.
+    Caller owns cleanup of the returned paths' parent temp dir.
     """
     script = Path(skill_bridge.SKILL_SCRIPTS) / "render_slides.py"
-    if not script.is_file():
+    if not script.is_file():  # pragma: no cover — vendored file guaranteed
         return {}
     out_dir = Path(tempfile.mkdtemp(prefix="slidesbot_renderall_"))
     try:
