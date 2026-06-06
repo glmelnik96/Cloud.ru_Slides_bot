@@ -222,8 +222,10 @@ def parse_node(state: SessionState) -> dict[str, Any]:
         render_pngs = _render_all_slides_png(path)
 
     # Grounding: slide 1 always; plus every visual slide we rendered.
+    # Reuse slide 1 from the full render when we already paid for it — avoids
+    # a second full-deck LibreOffice pass on visual decks.
     grounding = []
-    first = _render_first_slide_png(path)
+    first = render_pngs.get(1) or _render_first_slide_png(path)
     if first is not None:
         grounding.append(first)
     for n in visual_nums:
@@ -236,6 +238,11 @@ def parse_node(state: SessionState) -> dict[str, Any]:
         arts.pop("original_pngs", None)
 
     # Resolve image_path per visual slide and stitch it back into parsed_deck.
+    # FIXME(media_prep): the raster path re-extracts the whole deck once per
+    # raster slide, and extract_dir/render temp trees live in the system temp
+    # root (not the session dir) so they aren't swept on session cleanup.
+    # Tolerable today (decks carry ~1 raster slide) but worth a single
+    # up-front extraction + session-scoped temp dir if raster decks grow.
     extract_dir = Path(tempfile.mkdtemp(prefix="slidesbot_extract_"))
     pd = arts["parsed_deck"]
     for s in pd.get("slides", []):
