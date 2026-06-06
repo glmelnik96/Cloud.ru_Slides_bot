@@ -31,6 +31,35 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 
+def _walk_shapes(shapes, depth=0):
+    """Flatten the shape tree, recursing into GROUP shapes.
+
+    Returns a list of leaf-shape dicts:
+      {shape_type, text, left, top, w, h, depth}
+    Text is "" for non-text shapes. Geometry is in EMU (None if absent).
+    A shape that raises on attribute access is skipped, not fatal.
+    """
+    out = []
+    for shape in shapes:
+        try:
+            if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                out += _walk_shapes(shape.shapes, depth + 1)
+                continue
+            text = ""
+            if shape.has_text_frame:
+                text = shape.text_frame.text.strip()
+            out.append({
+                "shape_type": shape.shape_type,
+                "text": text,
+                "left": shape.left, "top": shape.top,
+                "w": shape.width, "h": shape.height,
+                "depth": depth,
+            })
+        except Exception:
+            continue
+    return out
+
+
 def parse(input_path):
     p = Presentation(input_path)
     result = {
