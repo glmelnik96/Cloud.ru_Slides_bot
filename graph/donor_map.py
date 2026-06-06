@@ -284,9 +284,40 @@ def slot_name_by_ph_idx(layout_idx: int) -> dict[int, str]:
     return out
 
 
+def body_ph_indices(layout_idx: int) -> set[int]:
+    """Placeholder indices that map to body-type slots in a donor.
+
+    Reuses ``_slot_name_to_ooxml`` (the same classifier the distributor
+    trusts) so "body" capacity here matches what build_v9 actually fills.
+    Native (``layout_idx == 0``) and unknown donors return an empty set.
+    """
+    if not layout_idx:
+        return set()
+    donor = _load().get(int(layout_idx))
+    if donor is None:
+        return set()
+    out: set[int] = set()
+    for name, slot in (donor.get("slots") or {}).items():
+        if not isinstance(slot, dict):
+            continue
+        ph = slot.get("shape_idx")
+        if ph is None:
+            continue
+        if _slot_name_to_ooxml(name) == "BODY":
+            out.add(int(ph))
+    return out
+
+
+def body_slot_count(layout_idx: int) -> int:
+    """Number of body-type slots a donor exposes (0 for native/unknown)."""
+    return len(body_ph_indices(layout_idx))
+
+
 __all__ = [
     "slot_specs_for_layouts",
     "slot_name_by_ph_idx",
+    "body_ph_indices",
+    "body_slot_count",
     "reload",
     "valid_donor_ids",
     "category_equivalence",
