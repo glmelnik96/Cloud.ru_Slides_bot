@@ -295,9 +295,10 @@ def test_recovered_line_equal_to_title_is_dropped(monkeypatch) -> None:
 
 
 def test_distinct_dropped_line_kept_when_title_differs(monkeypatch) -> None:
-    """Task 4 (b) — no false drop: a genuinely-dropped brief line that does
-    NOT equal the title is still recovered. Proves the filter is full-equality
-    against the title, not an over-broad gate that suppresses real content."""
+    """Task 4 (b) — no false drop: a genuinely-dropped brief line whose
+    significant-word overlap with the title is below ``_COVERAGE_THRESHOLD``
+    is still recovered. Proves the non-body coverage gate only suppresses
+    lines already represented in a non-body slot, not real distinct content."""
     monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
     raw_body = [
         "Уникальная мысль про кластеры регионы\n"

@@ -586,9 +586,13 @@ def _recover_dropped_body_lines(
         merely overflows the last column (deck3 slides 9/12: section headings
         living in subN slots + a title-variant were dumped into body[-1]).
         This SUBSUMES the old exact-equality title gate (the title is one
-        non-body slot) while also catching title VARIANTS and headings. The
-        BODY-only fast-gate and anchor remain BODY-only so genuine
-        dropped-body-line recovery is unaffected.
+        non-body slot) while also catching title VARIANTS and headings.
+        Accepted cost of the broadening from equality→overlap: a genuinely
+        distinct body line that happens to share ≥ ``_COVERAGE_THRESHOLD`` of
+        its significant words with a heading/title will be dropped (deemed
+        worth it — overflow off-slide is the worse failure). The BODY-only
+        fast-gate and anchor remain BODY-only so genuine dropped-body-line
+        recovery is unaffected.
 
     Guard rails: needs ≥1 body slot; fast-gates out when the distributed body
     already has ≥ as many non-empty lines as the brief (distributor split/kept
