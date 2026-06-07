@@ -577,6 +577,18 @@ def _recover_dropped_body_lines(
       • DUPLICATE/SUBSET gate: even with an anchor, suppress a candidate drop
         if some distributed line is largely a subset of it (overlap ≥
         ``_DUPLICATE_THRESHOLD``) — it would re-introduce kept content.
+      • NON-BODY COVERAGE gate (Task A): suppress a candidate whose max overlap
+        against any line of any NON-body slot (every slot in ``slots`` whose
+        name is NOT in ``body_slot_names`` — the title slot + section-header
+        placeholders on multi-section "multicolumn" donors) is ≥
+        ``_COVERAGE_THRESHOLD``. The slide already renders that content in a
+        non-body placeholder, so re-appending it as a trailing body bullet
+        merely overflows the last column (deck3 slides 9/12: section headings
+        living in subN slots + a title-variant were dumped into body[-1]).
+        This SUBSUMES the old exact-equality title gate (the title is one
+        non-body slot) while also catching title VARIANTS and headings. The
+        BODY-only fast-gate and anchor remain BODY-only so genuine
+        dropped-body-line recovery is unaffected.
 
     Guard rails: needs ≥1 body slot; fast-gates out when the distributed body
     already has ≥ as many non-empty lines as the brief (distributor split/kept
@@ -600,15 +612,19 @@ def _recover_dropped_body_lines(
         return []
 
     distributed_line_words = [_sig_words(dl) for dl in distributed_lines]
-    # Title-duplicate gate (Task 4): the body recovery / distribution logic can
-    # leave a heading line equal to the slide title in the brief body. Recovering
-    # it would render the title twice (title bar + trailing bullet). Drop any
-    # candidate whose NORMALISED text equals the title, using the SAME
-    # significant-word normalisation the duplicate/coverage gates use (``\\w+``
-    # tokens ≥3 chars, lowercased — strips punctuation/markdown). Equality of the
-    # word sets, not subset, so legitimate body lines that merely overlap the
-    # title are never over-dropped.
-    title_words = _sig_words(str(slots.get("title") or ""))
+    # Non-body coverage gate (Task A): tokenise every line of every NON-body
+    # slot (slots whose name is not a body slot — title + section-header
+    # placeholders). A candidate covered by one of these already renders in a
+    # non-body placeholder, so re-appending it as a body bullet just overflows
+    # the last column. This subsumes the old exact-equality title gate.
+    non_body_line_words: list[set[str]] = []
+    for name, value in slots.items():
+        if name in body_slot_names:
+            continue
+        for line in _body_lines(str(value or "")):
+            words = _sig_words(line)
+            if words:
+                non_body_line_words.append(words)
 
     # Pre-compute per-brief-line coverage so we can apply the wholesale-rephrase
     # anchor gate before deciding what (if anything) to recover.
@@ -627,9 +643,11 @@ def _recover_dropped_body_lines(
         if overlap >= _COVERAGE_THRESHOLD:
             continue  # already represented (kept / lightly reformatted)
         bwords = _sig_words(bl)
-        # Title-duplicate gate (Task 4): drop a candidate whose normalised text
-        # equals the title — re-appending it would duplicate the title in body.
-        if title_words and bwords == title_words:
+        # Non-body coverage gate (Task A): drop a candidate already represented
+        # in a non-body slot (title / section-header). Subsumes the old
+        # exact-equality title gate and also catches title variants + the
+        # slide's own section headings that live in column-header placeholders.
+        if _max_line_overlap(bwords, non_body_line_words) >= _COVERAGE_THRESHOLD:
             continue
         # Duplicate/subset gate: skip if any distributed line is largely a
         # subset of this candidate — it would re-introduce kept content.
@@ -820,7 +838,11 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                     name for name in slot_name_map.values()
                     if donor_map._slot_name_to_ooxml(name) == "BODY"
                 ]
-                if cls.get("_split_part"):
+                if cls.get("_split_part") or donor_map.is_timeline_donor(int(donor)):
+                    # Timeline donors (Task A Fix 2): fixed-capacity stepN_body
+                    # slots — appending overflow into "the last body slot" is
+                    # semantically wrong and overflows the slide (deck1 s7,
+                    # donor 60). Skip recovery for them, same as split fragments.
                     brief_body_for_recovery: list[str] = []
                 else:
                     src = cls.get("_source_slide") or num

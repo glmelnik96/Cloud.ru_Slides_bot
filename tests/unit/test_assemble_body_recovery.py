@@ -315,3 +315,146 @@ def test_distinct_dropped_line_kept_when_title_differs(monkeypatch) -> None:
     assert "Резервное копирование данных" in body
     non_empty = [ln for ln in body.split("\n") if ln.strip()]
     assert len(non_empty) == 2
+
+
+# ── Task A: non-body coverage suppression + timeline-donor skip ────────────
+
+
+def _multicolumn_artefacts(
+    *,
+    raw_body: list[str],
+    body_slots: dict[str, str],
+    header_slots: dict[str, str],
+    title_content: str,
+    num: int = 9,
+    donor: int = 33,
+) -> dict[str, Any]:
+    """Multi-section "multicolumn" donor bundle (mirrors live donor 33/34).
+
+    ``body_slots`` are BODY-type slots (bodyN), ``header_slots`` are the
+    NON-body section-header placeholders (subN, ooxml OTHER). The fixture
+    builds placeholder_assignments keyed by ph_idx using the donor's real
+    slot_name_by_ph_idx map so assemble_plan_node translates them back to the
+    canonical slot names (title/bodyN/subN).
+    """
+    from graph import donor_map
+
+    name_to_ph = {
+        name: ph for ph, name in donor_map.slot_name_by_ph_idx(donor).items()
+    }
+    phs: list[dict[str, Any]] = []
+    title_ph = name_to_ph.get("title", 0)
+    phs.append({"ph_idx": title_ph, "content": title_content, "ph_type": "TITLE"})
+    for name, content in body_slots.items():
+        phs.append({"ph_idx": name_to_ph[name], "content": content, "ph_type": "BODY"})
+    for name, content in header_slots.items():
+        phs.append({"ph_idx": name_to_ph[name], "content": content, "ph_type": "BODY"})
+    return {
+        "brief": {
+            "topic": "Deck",
+            "slide_count": 1,
+            "slides": [{"num": num, "raw_title": title_content, "raw_body": raw_body}],
+        },
+        "classification": {"slides": [{
+            "num": num, "category": "text",
+            "subcategory_hint": "", "rationale": "",
+        }]},
+        "layouts": {"slides": [{"num": num, "layout_idx": donor}]},
+        "content": {"slides": [{"slide_num": num, "placeholder_assignments": phs}]},
+        "infographics": {"slides": []},
+        "icons": {"slides": []},
+    }
+
+
+def test_section_headings_in_nonbody_slots_not_recovered(monkeypatch) -> None:
+    """Task A Fix 1 — multi-section slide (deck3 slide 9 reproduction).
+
+    The slide's own section headings live in NON-body header slots (subN,
+    ooxml OTHER) and a title-variant lives in the title slot. They appear in
+    the brief body too. The distributor correctly placed them in the header
+    slots, so they show as "uncovered" against the BODY slots and the old
+    recovery dumped them into the last body slot, overflowing the slide.
+
+    The non-body coverage gate must suppress them: only a genuinely-dropped
+    body line (absent from EVERY slot) may be recovered.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Галлюцинации LLM, низкая точность\n"
+        "ТЕХНОЛОГИЧЕСКИЕ\n"
+        "ОРГАНИЗАЦИОННЫЕ\n"
+        "РЕГУЛЯТОРНЫЕ\n"
+        "Барьеры применения ИИ-агентов на предприятии\n"
+        "Совершенно потерянная уникальная строка контента"
+    ]
+    # Distributor placed only the one body line it kept; the other body slots
+    # are empty (distributed body line-count < brief line-count → recovery is
+    # NOT fast-gated out, so the suppression gate is genuinely exercised).
+    body_slots = {
+        "body1": "Галлюцинации LLM, низкая точность.",
+        "body2": "",
+        "body3": "",
+        "body4": "",
+        "body5": "",
+        "body6": "",
+    }
+    header_slots = {
+        "sub1": "ТЕХНОЛОГИЧЕСКИЕ",
+        "sub2": "ОРГАНИЗАЦИОННЫЕ",
+        "sub3": "РЕГУЛЯТОРНЫЕ",
+        "sub4": "ЭКОНОМИЧЕСКИЕ",
+        "sub5": "РИСКИ ДАННЫХ",
+        "sub6": "УПРАВЛЕНЧЕСКИЕ",
+    }
+    state = _make_state(_multicolumn_artefacts(
+        raw_body=raw_body,
+        body_slots=body_slots,
+        header_slots=header_slots,
+        title_content="Барьеры применения ИИ-агентов",
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    last_body = slots["body6"]
+    # Section headings (in subN slots) must NOT leak into the last body slot.
+    assert "ТЕХНОЛОГИЧЕСКИЕ" not in last_body
+    assert "ОРГАНИЗАЦИОННЫЕ" not in last_body
+    assert "РЕГУЛЯТОРНЫЕ" not in last_body
+    # The title-variant (overlaps the title slot) must NOT leak either.
+    assert "Барьеры применения" not in last_body
+    # The genuinely-dropped content line (absent from EVERY slot) IS recovered.
+    assert "Совершенно потерянная уникальная строка контента" in last_body
+
+
+def test_timeline_donor_recovery_is_skipped(monkeypatch) -> None:
+    """Task A Fix 2 — timeline donors have fixed-capacity stepN_body slots;
+    appending recovered overflow into "the last body slot" is semantically
+    wrong and overflows the slide (deck1 slide 7, donor 60).
+
+    Recovery must be skipped entirely when the slide clones a timeline donor,
+    even if a brief body line looks genuinely dropped.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    from graph import donor_map
+
+    # Sanity: donor 60 is a real timeline donor (no monkeypatch needed).
+    assert donor_map.is_timeline_donor(60) is True
+
+    # Use the single-body-slot donor-21 fixture shape but point it at the
+    # timeline donor by monkeypatching is_timeline_donor for the donor we use,
+    # so the slot map / body-slot logic is exercised exactly as in production.
+    raw_body = [
+        "Запуск пилота в первом квартале\n"
+        "Совершенно отдельный потерянный пункт"
+    ]
+    body_content = "Запуск пилота в первом квартале."
+    state = _make_state(_artefacts(raw_body=raw_body, body_content=body_content))
+    # Mark donor 21 as a timeline donor for this test only.
+    monkeypatch.setattr(
+        "graph.donor_map.is_timeline_donor",
+        lambda d: int(d) == 21,
+    )
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    # Recovery skipped → body untouched, the "dropped" line NOT appended.
+    assert body == "Запуск пилота в первом квартале."
+    assert "Совершенно отдельный потерянный пункт" not in body
