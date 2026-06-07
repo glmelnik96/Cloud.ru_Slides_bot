@@ -18,6 +18,7 @@ from pptx.util import Pt  # noqa: E402
 
 from kpi_emphasis import (  # noqa: E402  (path injected by skill_bridge)
     _NUMBER_RE,
+    _is_dotted_segment,
     _qualifies,
     apply_kpi_emphasis,
     emphasize_kpi_in_slide,
@@ -48,6 +49,44 @@ def test_number_regex_matches(text: str, expected_tokens: list[str]) -> None:
     found = [m.group(0).rstrip() for m in _NUMBER_RE.finditer(text)
              if _qualifies(m.group("num"), m.group("unit"))]
     assert found == expected_tokens
+
+
+# ─── Version / multi-dot exclusion ────────────────────────────────────────────
+# Bug (2026-06-07): "v1.12.16" greened only the "12.16" fragment, leaving
+# "v1." graphite — an ugly half-green version. Multi-segment dotted numbers
+# (version strings, IP-like) must NOT be partially emphasized. A *single*
+# decimal separator (real decimal, e.g. "12.16") must still qualify.
+
+def _matched_tokens(text: str) -> list[str]:
+    """Mirror the production match-filter: qualifies AND not a dotted segment."""
+    return [m.group(0).rstrip() for m in _NUMBER_RE.finditer(text)
+            if _qualifies(m.group("num"), m.group("unit"))
+            and not _is_dotted_segment(text, m.start("num"), m.end("num"))]
+
+
+@pytest.mark.parametrize("text", [
+    "v1.12.16",
+    "1.12.16",
+    "v1.12.17 → v1.12.18",
+    "192.168.0.1",
+    "Версия 3.14.15 выпущена",
+])
+def test_multidot_version_not_emphasized(text: str) -> None:
+    """Multi-segment dotted numbers (version / IP) produce NO match."""
+    assert _matched_tokens(text) == []
+
+
+@pytest.mark.parametrize("text, expected_tokens", [
+    # A single decimal separator is a real number — still emphasizable.
+    ("значение 12.16 пунктов", ["12.16"]),
+    ("рост 2,5 раза", ["2,5 раза"]),
+    ("итог 14,2 млн", ["14,2 млн"]),
+    # Thousands grouping uses spaces, not dots — must still match.
+    ("Сумма 568 125 090 руб", ["568 125 090 руб"]),
+])
+def test_single_decimal_still_emphasized(text: str,
+                                         expected_tokens: list[str]) -> None:
+    assert _matched_tokens(text) == expected_tokens
 
 
 def test_qualifies_threshold() -> None:
@@ -125,6 +164,17 @@ def test_emphasize_skips_short_number(blank_slide) -> None:
     assert n == 0
 
 
+def test_emphasize_skips_version_string(blank_slide) -> None:
+    """A dotted version like 'v1.12.16' must not get a half-green fragment."""
+    prs, slide = blank_slide
+    _add_textbox(slide, "Релиз v1.12.16 уже доступен", size_pt=14)
+    n = emphasize_kpi_in_slide(slide)
+    assert n == 0
+    assert _count_emphasized_runs(slide) == 0
+    # Version text preserved intact in a single (unsplit) run path.
+    assert "v1.12.16" in slide.shapes[-1].text_frame.text
+
+
 def test_apply_kpi_emphasis_skips_kpi_native(blank_slide) -> None:
     """Slides marked as kpi_native are skipped — render_kpi handles them."""
     prs, slide = blank_slide
@@ -166,8 +216,10 @@ def _count_emphasized_runs_with_color(slide, hex_upper: str) -> int:
 
 def test_emphasize_falls_back_to_graphite_on_green_box(blank_slide) -> None:
     """D2 fix: green KPI on a green-filled rect is invisible. The pass must
-    switch to graphite (#222222) when the parent shape fills brand green —
-    live run1.slide8 had `12.18` disappear inside an accent box."""
+    switch to graphite (#222222) when the parent shape fills brand green.
+    (Originally fixtured on the version `v1.12.18`; since the 2026-06-07
+    version-skip fix that token is no longer emphasized at all, so we use a
+    genuine KPI number to keep exercising the graphite fallback.)"""
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
     from pptx.util import Emu
@@ -182,7 +234,7 @@ def test_emphasize_falls_back_to_graphite_on_green_box(blank_slide) -> None:
     tf = shape.text_frame
     p = tf.paragraphs[0]
     run = p.add_run()
-    run.text = "v1.12.18 (май)"
+    run.text = "275 контактов (май)"
     run.font.size = Pt(14)
 
     n = emphasize_kpi_in_slide(slide)
@@ -198,7 +250,9 @@ def test_emphasize_falls_back_to_graphite_when_overlapping_green(blank_slide) ->
     shape itself isn't green so the legacy D2 check missed it — emphasis
     painted digits green-on-green, hiding them (live run4.slide8 lost
     "12.17" inside the middle accent block). The overlap detector must
-    catch this and switch to graphite."""
+    catch this and switch to graphite. (Fixture switched from the version
+    `v1.12.17` to a genuine KPI number after the 2026-06-07 version-skip
+    fix, which now suppresses version emphasis entirely.)"""
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
     from pptx.util import Emu
@@ -220,7 +274,7 @@ def test_emphasize_falls_back_to_graphite_when_overlapping_green(blank_slide) ->
     tf = text_box.text_frame
     p = tf.paragraphs[0]
     run = p.add_run()
-    run.text = "v1.12.17 (апрель)"
+    run.text = "275 контактов (апрель)"
     run.font.size = Pt(14)
 
     n = emphasize_kpi_in_slide(slide)

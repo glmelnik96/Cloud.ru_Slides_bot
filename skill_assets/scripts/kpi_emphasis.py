@@ -74,6 +74,30 @@ def _qualifies(num: str, unit: str | None) -> bool:
     return digits >= 3
 
 
+def _is_dotted_segment(text: str, start: int, end: int) -> bool:
+    """True if the matched span [start:end] is a *segment* of a longer
+    multi-dot/sequenced number (a version string like ``v1.12.16`` or an
+    IP-like ``192.168.0.1``).
+
+    Bug (2026-06-07): for ``v1.12.16`` _NUMBER_RE cannot start at the leading
+    ``1`` (preceded by ``v``=\\w) but happily matches the ``12.16`` fragment,
+    greening only a middle slice of the version → ugly half-green number.
+
+    Rule: a span is a dotted segment when a digit-dot-digit boundary straddles
+    it — i.e. the char immediately before is ``.`` preceded by a digit, OR the
+    char immediately after is ``.`` followed by a digit. A *single* decimal
+    separator (e.g. ``12.16`` standing alone, or ``568 125 090`` grouped by
+    spaces) is NOT a dotted segment and stays emphasizable.
+    """
+    # Preceded by ".<digit-before>" → we're the tail of a dotted sequence.
+    if start >= 2 and text[start - 1] == "." and text[start - 2].isdigit():
+        return True
+    # Followed by ".<digit-after>" → we're the head of a dotted sequence.
+    if end + 1 < len(text) and text[end] == "." and text[end + 1].isdigit():
+        return True
+    return False
+
+
 def _set_run_emphasis(rPr: etree._Element, *, color_hex: str = _GREEN_HEX) -> None:
     """Мутирует <a:rPr>: b='1', color=<color_hex> (default green).
 
@@ -194,7 +218,9 @@ def _emphasize_paragraph(p_el: etree._Element, *,
                 continue
 
         matches = [m for m in _NUMBER_RE.finditer(text)
-                   if _qualifies(m.group("num"), m.group("unit"))]
+                   if _qualifies(m.group("num"), m.group("unit"))
+                   and not _is_dotted_segment(text, m.start("num"),
+                                              m.end("num"))]
         if not matches:
             continue
 
