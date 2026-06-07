@@ -63,6 +63,29 @@ def test_truncation_not_applied_when_shrink_suffices():
     assert "…" not in text
 
 
+def test_d1_shrink_preferred_over_truncation_keeps_trailing_token():
+    """D1: a body that fits after a modest shrink (above the min) is NOT
+    ellipsis-truncated — the trailing token (e.g. a number) is preserved.
+
+    Sized so the text overflows at the 15pt base but fits comfortably after
+    shrinking toward, but not down to, the floor. The old code jumped straight
+    to min-size truncation when fit_text's conservative-margin size still
+    failed the local capacity check, dropping the last word ("112")."""
+    if not GEOFIT_AVAILABLE:
+        import pytest
+        pytest.skip("textfit/Pillow unavailable")
+    body = ("Этот блок карточки содержит несколько фраз и завершается важным "
+            "числовым показателем 112")
+    # Box forces a shrink below the 15pt base, but the text still fits whole at
+    # a size above the floor — so it must NOT reach the truncation branch.
+    size, text = _fit_card_body(body, 260, 120, _BASE)
+    assert size < _BASE, "this box must engage the shrink path"
+    assert size > _CARD_BODY_MIN_PT, "fits above the floor — bounded shrink"
+    assert "…" not in text, "modest shrink must avoid the ellipsis branch"
+    assert text == body, "no tokens dropped"
+    assert text.endswith("112"), "trailing number preserved"
+
+
 def test_render_card_grid_long_body_does_not_raise():
     """End-to-end: rendering a grid with a long card body succeeds and emits
     a body run whose font size is reduced below the 15pt default."""
