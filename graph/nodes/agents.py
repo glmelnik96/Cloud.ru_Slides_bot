@@ -582,6 +582,118 @@ def _diversify_text_slides(
     return promoted
 
 
+# A body is "substantial" — worth its own companion slide next to an
+# ``image_native`` — when it carries real prose, not a one-line caption. The
+# sparse detector treats a body slot of <= ``_SPARSE_THIN_WORDS`` (2) words as
+# trivial; a substantial body is several such slots' worth. ``_SPARSE_MIN_BODY_
+# SLOTS`` (3) × ~2× the thin-word floor ≈ 12 words is the floor below which the
+# text reads as a caption the image already implies (OBS/CCE: a couple of short
+# captions stay folded; two real sentences earn a companion).
+_IMG_COMPANION_MIN_BODY_WORDS = 12
+
+
+def _slide_body_word_count(bs: dict[str, Any]) -> int:
+    """Total word count across a brief slide's ``raw_body`` lines."""
+    return sum(
+        len(str(x).replace("\x0b", " ").split())
+        for x in (bs.get("raw_body") or [])
+        if str(x).strip()
+    )
+
+
+def _inject_image_companions(
+    classification_dump: dict[str, Any],
+    brief: dict[str, Any],
+) -> int:
+    """Inject a companion text slide for an ``image_native`` whose body is lost.
+
+    The ``image_native`` renderer draws only the picture (title/caption), never
+    the body prose. The LLM emits a companion text slide ONLY when the body is
+    card-shaped (CONFIG/IOTDM); for OBS/CCE-style slides (<=2 sections of prose
+    + a dominant image) the body is dropped — image shown, prose gone.
+
+    Deterministic mirror of that companion (repo's guard-over-LLM-trust spirit):
+    for each ``image_native`` slide whose brief body is substantial
+    (>= ``_IMG_COMPANION_MIN_BODY_WORDS`` words) AND has no sibling text/card
+    slide for the same ``_source_slide``, inject a companion carrying the body —
+    a ``card_grid`` flow native when card-shaped (``_looks_like_card_grid``),
+    else a plain text/multicolumn slide the distributor fills from the brief by
+    ``_source_slide``.
+
+    Runs AFTER ``_inject_visual_slides`` (the image route must be settled) and
+    consumes the brief, the source of the body the image_native slide can't show.
+    Split parts are never touched. A fresh deck num (max existing + 1) is
+    allocated per companion — reusing the source num collides with split parts.
+    Mutates in place; returns the count of companions injected.
+    """
+    brief_by_num: dict[int, dict[str, Any]] = {}
+    for bs in (brief.get("slides") or []):
+        n = bs.get("num")
+        if isinstance(n, int):
+            brief_by_num[n] = bs
+    if not brief_by_num:
+        return 0
+
+    slides = classification_dump.setdefault("slides", [])
+    # A sibling that already carries the body: any non-image_native slide
+    # (text/multicolumn donor OR a body-bearing native) sharing the source.
+    siblings_by_src: dict[int, bool] = {}
+    for s in slides:
+        if s.get("slide_type") == "image_native":
+            continue
+        src = s.get("_source_slide") or s.get("num")
+        if isinstance(src, int):
+            siblings_by_src[src] = True
+
+    next_num = max(
+        (s.get("num") for s in slides if isinstance(s.get("num"), int)),
+        default=0,
+    ) + 1
+    injected = 0
+    for s in list(slides):
+        if s.get("slide_type") != "image_native" or s.get("_split_part"):
+            continue
+        src = s.get("_source_slide") or s.get("num")
+        if not isinstance(src, int):
+            continue
+        if siblings_by_src.get(src):
+            continue  # a sibling text/card slide already carries the body
+        bs = brief_by_num.get(src)
+        if not bs:
+            continue
+        if _slide_body_word_count(bs) < _IMG_COMPANION_MIN_BODY_WORDS:
+            continue  # caption-sized body the image already implies → fold it
+
+        deck_num = next_num
+        next_num += 1
+        comp: dict[str, Any] = {
+            "num": deck_num,
+            "category": "text",
+            "subcategory_hint": "",
+            "rationale": "companion: image_native body recovered to text slide",
+            "slide_type": None,
+            "kpi": None, "chart": None, "table": None, "flow": None, "image": None,
+            "_source_slide": src,
+        }
+        raw_items = [str(x) for x in (bs.get("raw_body") or []) if str(x).strip()]
+        cards = [c for c in (_card_from_body_item(r) for r in raw_items) if c]
+        if _looks_like_card_grid(cards):
+            _set_card_grid(comp, (bs.get("raw_title") or "").strip(), cards)
+        elif len(raw_items) > 1:
+            comp["category"] = "multicolumn"
+        slides.append(comp)
+        siblings_by_src[src] = True
+        injected += 1
+
+    if injected:
+        # Keep each companion next to its image_native sibling (same convention
+        # as _recover_dropped_slides): order is by classification ARRAY position
+        # downstream, lookups are by num/_source_slide — reordering is safe.
+        slides.sort(key=lambda s: (s.get("_source_slide") or s.get("num") or 0,
+                                   s.get("_split_part") or ""))
+    return injected
+
+
 # Brief intents that mean "a table IS the slide's content" (Agent 01 prompt:
 # "schema/chart/table — диаграмма/график/таблица как основное содержимое").
 # A dropped slide with this intent is recovered as a ``table_native``.
@@ -810,6 +922,7 @@ def classify_node(state: SessionState) -> dict[str, Any]:
         classification_dump, arts.get("parsed_deck") or {})
     visual_routed = _inject_visual_slides(
         classification_dump, arts.get("parsed_deck") or {})
+    image_companions = _inject_image_companions(classification_dump, brief)
     diversified = _diversify_text_slides(classification_dump, brief)
     arts["classification"] = classification_dump
     if recovered_slides:
@@ -850,6 +963,12 @@ def classify_node(state: SessionState) -> dict[str, Any]:
             session_id=state.session_id,
             count=overflow_kpis,
         )
+    if image_companions:
+        logger.info(
+            "node.classify.image_companion_injected",
+            session_id=state.session_id,
+            count=image_companions,
+        )
     if diversified:
         logger.info(
             "node.classify.text_slides_diversified",
@@ -865,6 +984,7 @@ def classify_node(state: SessionState) -> dict[str, Any]:
                 visual_image_routed=visual_routed["image"],
                 visual_flow_routed=visual_routed["flow"],
                 text_slides_diversified=diversified,
+                image_companions_injected=image_companions,
                 slides_recovered=len(recovered_slides))
     return {"artefacts": arts, "stage": Stage.CLASSIFYING.value, "progress_pct": 30}
 
