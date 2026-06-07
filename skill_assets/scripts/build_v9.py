@@ -396,6 +396,59 @@ def clone_slide(prs, src_slide):
     return prs.slides[-1]
 
 
+def strip_residual_markdown(prs) -> int:
+    """Final whole-deck markdown / control-char strip — runs AFTER emphasis.
+
+    apply_kpi_emphasis consumes intentional ``**…**`` emphasis, BUT it SKIPS
+    title_like shapes (first run >= 28pt) and skip-type slides. Donors 21/22
+    carry a 32pt body → title_like → their ``**`` is never stripped and leaks
+    as literal asterisks (session 81673 s5: ``**ССM (Cloud Certificate
+    Manager)**``). The per-slot chokepoint wrote that text with
+    ``strip_markdown=False`` on purpose so emphasis could see the markers; by
+    the time this pass runs all intentional emphasis is already applied, so any
+    remaining ``**`` / lone-emphasis ``*`` is a leak and blanket-stripping is
+    safe.
+
+    Covers every run on every shape (including title_like bodies emphasis
+    skipped), table_native cells and the table subtitle / before-after textboxes
+    (all written with ``strip_markdown=False``), plus grouped sub-shapes.
+    Idempotent: a second strip_markdown pass over already-clean text is a no-op.
+
+    MUST run AFTER apply_kpi_emphasis — never before, or it would eat the
+    markers that drive bolding.
+
+    Returns: number of runs whose text was changed.
+    """
+    from text_sanitize import sanitize_text
+
+    changed = 0
+
+    def _strip_runs_in_text_frame(text_frame):
+        nonlocal changed
+        for para in text_frame.paragraphs:
+            for run in para.runs:
+                cleaned = sanitize_text(run.text, strip_markdown=True)
+                if cleaned != run.text:
+                    run.text = cleaned
+                    changed += 1
+
+    def _strip_shape(shape):
+        if shape.has_text_frame:
+            _strip_runs_in_text_frame(shape.text_frame)
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    _strip_runs_in_text_frame(cell.text_frame)
+        if shape.shape_type == 6:  # MSO_SHAPE_TYPE.GROUP
+            for sub in shape.shapes:
+                _strip_shape(sub)
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            _strip_shape(shape)
+    return changed
+
+
 def build(plan_path, template_path, output_path, donor_map_path):
     plan = json.load(open(plan_path, encoding="utf-8"))
     p = Presentation(template_path)
@@ -1026,6 +1079,25 @@ def build(plan_path, template_path, output_path, donor_map_path):
             print(f"kpi_emphasis: {emph_stats}", file=sys.stderr)
     except Exception as e:
         print(f"WARN: kpi_emphasis pass skipped: {e}", file=sys.stderr)
+
+    # === FINAL: residual markdown / control-char strip over the WHOLE deck ===
+    # apply_kpi_emphasis consumes intentional ``**…**`` emphasis, BUT it SKIPS
+    # title_like shapes (first run >= 28pt) and skip-type slides. Donors 21/22
+    # carry a 32pt body → title_like → their ``**`` is never stripped and leaks
+    # as literal asterisks (session 81673 s5: ``**ССM (Cloud Certificate
+    # Manager)**``). The per-slot chokepoint wrote that text with
+    # strip_markdown=False on purpose (so emphasis could see the markers).
+    # By NOW all intentional emphasis is already applied, so any remaining
+    # ``**`` / lone-emphasis ``*`` is a leak and blanket-stripping is safe.
+    # Runs AFTER emphasis (never before — that would break bolding) and covers
+    # every run on every shape, including title_like bodies, table_native cells
+    # and the table subtitle / before-after textboxes (all written with
+    # strip_markdown=False). Idempotent: a second strip_markdown pass over text
+    # whose control chars are already clean is a no-op.
+    try:
+        strip_residual_markdown(p)
+    except Exception as e:
+        print(f"WARN: markdown-strip pass skipped: {e}", file=sys.stderr)
 
     p.save(output_path)
     print(f"Saved {output_path}: {len(p.slides)} slides, {pictures_inserted} pictures inserted",
