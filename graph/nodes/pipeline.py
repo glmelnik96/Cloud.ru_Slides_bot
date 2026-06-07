@@ -585,6 +585,28 @@ def _looks_like_date_or_event(text: str) -> bool:
     return False
 
 
+# Dangling-fragment recovery guard (cross-slide heading bleed, deck3 s2). A
+# foreign slide's title split at a comma ("ПАМЯТКА ПО ДЕЙСТВИЯМ РАБОТНИКОВ,")
+# leaks into this slide's brief body. It is uncovered against the distributed
+# body AND not in this slide's own non-body slots (it belongs to a DIFFERENT
+# slide), so the existing gates miss it. A complete body bullet never ends with
+# a trailing comma/colon/semicolon/dash, so such cut-off heading fragments are
+# suppressed from recovery.
+_DANGLING_TAIL_CHARS = (",", ":", ";", "—", "–", "-")
+_SENTENCE_END_CHARS = (".", "!", "?", "…")
+
+
+def _is_dangling_fragment(text: str) -> bool:
+    """True when ``text`` looks like a cut-off heading/sentence fragment that
+    must NOT be re-appended as a standalone body bullet: it ends with a
+    dangling connector (comma/colon/semicolon/dash) and not with sentence
+    terminal punctuation."""
+    s = (text or "").strip()
+    if not s or s.endswith(_SENTENCE_END_CHARS):
+        return False
+    return s.endswith(_DANGLING_TAIL_CHARS)
+
+
 def _body_lines(text: str) -> list[str]:
     """Split a body string into non-empty logical lines (\n or \v separated)."""
     if not text:
@@ -735,6 +757,11 @@ def _recover_dropped_body_lines(
     for bl, overlap in zip(brief_lines, coverage):
         if overlap >= _COVERAGE_THRESHOLD:
             continue  # already represented (kept / lightly reformatted)
+        # Dangling-fragment gate: a cut-off heading/sentence fragment (trailing
+        # comma/colon/dash, no sentence terminator) is a foreign-slide title
+        # split mid-line — never a standalone body bullet (deck3 s2 bleed).
+        if _is_dangling_fragment(bl):
+            continue
         bwords = _sig_words(bl)
         # Non-body coverage gate (Task A): drop a candidate already represented
         # in a non-body slot (title / section-header). Subsumes the old

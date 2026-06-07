@@ -554,6 +554,41 @@ def test_pathological_recovery_is_capped_to_budget(monkeypatch) -> None:
     assert "сценарий 1" in last
 
 
+def test_dangling_heading_fragment_not_recovered(monkeypatch) -> None:
+    """Part 1b — cross-slide heading-fragment bleed (deck3 slide 2 repro).
+
+    A foreign slide's title ("ПАМЯТКА ПО ДЕЙСТВИЯМ РАБОТНИКОВ, ПОСЛЕ
+    ОКОНЧАНИЯ ОБСТРЕЛА...") was split at the comma; its first half — a
+    dangling fragment ending in a comma — leaked into this slide's brief
+    body. It is genuinely "uncovered" against the distributed body and is
+    not represented in this slide's own non-body slots (it belongs to a
+    DIFFERENT slide), so the existing gates miss it and the cap kept it as
+    the single recovered line → an ALL-CAPS heading bled into the last
+    column.
+
+    A complete body bullet never ends with a trailing comma/colon/dash, so
+    such dangling fragments must be suppressed from recovery.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Короткий якорный пункт колонки\n"
+        "ПАМЯТКА ПО ДЕЙСТВИЯМ РАБОТНИКОВ,\n"
+        "Полноценный потерянный пункт про укрытие в подвале"
+    ]
+    col1_body = "Короткий якорный пункт колонки."
+    col2_body = ""
+    state = _make_state(_two_column_artefacts(
+        raw_body=raw_body, col1_body=col1_body, col2_body=col2_body,
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    last = slots["col2_body"]
+    # The dangling comma-terminated heading fragment must NOT be recovered.
+    assert "ПАМЯТКА ПО ДЕЙСТВИЯМ РАБОТНИКОВ" not in last
+    # The genuinely-dropped COMPLETE line is still recovered.
+    assert "Полноценный потерянный пункт про укрытие" in last
+
+
 def test_normal_small_recovery_unchanged_by_cap(monkeypatch) -> None:
     """Part 1 — the cap must NOT bite on the normal case: a couple of
     genuinely-dropped short lines are still fully recovered (regression
