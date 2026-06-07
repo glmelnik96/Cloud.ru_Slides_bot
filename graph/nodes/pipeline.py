@@ -577,14 +577,24 @@ def _recover_dropped_body_lines(
       • DUPLICATE/SUBSET gate: even with an anchor, suppress a candidate drop
         if some distributed line is largely a subset of it (overlap ≥
         ``_DUPLICATE_THRESHOLD``) — it would re-introduce kept content.
-      • NON-BODY COVERAGE gate (Task A): suppress a candidate whose max overlap
-        against any line of any NON-body slot (every slot in ``slots`` whose
-        name is NOT in ``body_slot_names`` — the title slot + section-header
-        placeholders on multi-section "multicolumn" donors) is ≥
-        ``_COVERAGE_THRESHOLD``. The slide already renders that content in a
-        non-body placeholder, so re-appending it as a trailing body bullet
-        merely overflows the last column (deck3 slides 9/12: section headings
-        living in subN slots + a title-variant were dumped into body[-1]).
+      • NON-BODY COVERAGE gate (Task A): suppress a candidate when it is
+        BIDIRECTIONALLY contained with any line of any NON-body slot (every slot
+        in ``slots`` whose name is NOT in ``body_slot_names`` — the title slot +
+        section-header placeholders on multi-section "multicolumn" donors).
+        Two directions, each gated at ``_COVERAGE_THRESHOLD``: (a) the candidate
+        is a SUBSET of a non-body line (denominator = candidate's words; the
+        heading is the longer text), and (b) a non-body line is a SUBSET of the
+        candidate (denominator = the non-body line's words; the candidate is a
+        SUPERSET that extends the title/heading with extra words). Direction (b)
+        catches title-VARIANT superset leaks the candidate-denominator check
+        misses — deck3 s12, where the body bullet "ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО
+        ЗАПУСКА ПРОДУКТОВ, ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ" (~9 sig words) is
+        a superset of the ~4-word title: |title ∩ cand|/|cand| ≈ 0.44 < 0.6 (a)
+        misses it, but |cand ∩ title|/|title| = 1.0 ≥ 0.6 (b) suppresses it.
+        The slide already renders that content in a non-body placeholder, so
+        re-appending it as a trailing body bullet merely overflows the last
+        column (deck3 slides 9/12: section headings living in subN slots + a
+        title-variant were dumped into body[-1]).
         This SUBSUMES the old exact-equality title gate (the title is one
         non-body slot) while also catching title VARIANTS and headings.
         Accepted cost of the broadening from equality→overlap: a genuinely
@@ -651,7 +661,19 @@ def _recover_dropped_body_lines(
         # in a non-body slot (title / section-header). Subsumes the old
         # exact-equality title gate and also catches title variants + the
         # slide's own section headings that live in column-header placeholders.
+        # Bidirectional containment: (a) candidate-denominator — candidate is a
+        # SUBSET of a non-body line (heading is longer); (b) non-body-denominator
+        # — a non-body line is a SUBSET of the candidate (candidate is a SUPERSET
+        # that extends the title/heading with extra words). Direction (b) catches
+        # title-VARIANT superset leaks (deck3 s12: body bullet "<title> ПРОДУКТОВ,
+        # ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ" — |title ∩ cand|/|cand| ≈ 0.44 misses
+        # it, but |cand ∩ title|/|title| = 1.0 suppresses it).
         if _max_line_overlap(bwords, non_body_line_words) >= _COVERAGE_THRESHOLD:
+            continue
+        if any(
+            nb_words and len(bwords & nb_words) / len(nb_words) >= _COVERAGE_THRESHOLD
+            for nb_words in non_body_line_words
+        ):
             continue
         # Duplicate/subset gate: skip if any distributed line is largely a
         # subset of this candidate — it would re-introduce kept content.

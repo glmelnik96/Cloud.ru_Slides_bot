@@ -426,6 +426,51 @@ def test_section_headings_in_nonbody_slots_not_recovered(monkeypatch) -> None:
     assert "Совершенно потерянная уникальная строка контента" in last_body
 
 
+def test_title_superset_body_line_not_recovered(monkeypatch) -> None:
+    """Task A — title-VARIANT superset leak (deck3 slide 12 reproduction).
+
+    The slide title is short ("ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО ЗАПУСКА", ~4 sig
+    words). The brief carries a longer body bullet that is a SUPERSET of the
+    title — the same title words plus extra trailing words ("...ПРОДУКТОВ,
+    ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ", ~9 sig words).
+
+    The candidate-denominator non-body gate computes |title ∩ candidate| /
+    |candidate| = 4/9 ≈ 0.44 < threshold, so the superset bullet slips
+    through and overflows the last body column. The symmetric non-body subset
+    check (|candidate ∩ title| / |title| = 4/4 = 1.0 ≥ threshold) must
+    suppress it.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Стабильная инфраструктура и зрелые процессы команды\n"
+        "ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО ЗАПУСКА ПРОДУКТОВ, "
+        "ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ"
+    ]
+    # Distributor kept ONLY the distinctive first line (anchor); the title-
+    # superset line shows as "uncovered" against the body slots.
+    body_slots = {
+        "body1": "Стабильная инфраструктура и зрелые процессы команды.",
+        "body2": "",
+        "body3": "",
+        "body4": "",
+        "body5": "",
+        "body6": "",
+    }
+    state = _make_state(_multicolumn_artefacts(
+        raw_body=raw_body,
+        body_slots=body_slots,
+        header_slots={},
+        title_content="ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО ЗАПУСКА",
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    last_body = slots["body6"]
+    # The title-superset bullet must NOT leak into the last body slot.
+    assert "ПРОДУКТОВ" not in last_body
+    assert "ИИ-АГЕНТОВ" not in last_body
+    assert "ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО ЗАПУСКА" not in last_body
+
+
 def test_timeline_donor_recovery_is_skipped(monkeypatch) -> None:
     """Task A Fix 2 — timeline donors have fixed-capacity stepN_body slots;
     appending recovered overflow into "the last body slot" is semantically
