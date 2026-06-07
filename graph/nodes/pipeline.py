@@ -395,6 +395,19 @@ def _native_block_is_usable(slide_type: str, cls: dict[str, Any]) -> bool:
         # bypasses it (autofix re-injection, future agents). We drop non-numeric
         # values and reject the slide if none remain or >3 survive — assemble
         # then skips it rather than crashing the pipeline.
+        #
+        # NOTE: the digit check below intentionally mirrors agents._kpi_value_has_digit
+        # (same `any(ch.isdigit() …)` rule). It is duplicated rather than imported:
+        # pipeline.py is a sibling node module that does not import from agents.py,
+        # and there is no shared util home — a one-line check is not worth a new
+        # module or a cross-node dependency just to dedupe.
+        #
+        # NOTE: the `len(valid) > 3` case here deliberately REJECTS (returns
+        # False → assemble skips the slide), unlike _coerce_overflow_kpis which
+        # REBUILDS >3 into a card_grid to preserve every pair. This is the
+        # last-resort guard for paths that bypass the classifier coercion; by
+        # the time we reach here the card-grid rebuild window has passed, so the
+        # asymmetry is intentional — do NOT "fix" it to rebuild here.
         valid = [n for n in nums
                  if any(ch.isdigit() for ch in str((n or {}).get("value", "")))]
         if not valid or len(valid) > 3:

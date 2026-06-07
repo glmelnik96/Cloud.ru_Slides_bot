@@ -14,6 +14,7 @@ rendered the word "Прогноз" as a giant number):
 from __future__ import annotations
 
 from graph.nodes.agents import _coerce_overflow_kpis, _kpi_value_has_digit
+from graph.nodes.pipeline import _native_block_is_usable
 
 
 def _cls(numbers):
@@ -140,3 +141,26 @@ def test_non_kpi_slides_untouched():
     cls = {"slides": [{"num": 1, "slide_type": "table_native",
                        "kpi": None, "table": {"headers": ["a"]}}]}
     assert _coerce_overflow_kpis(cls) == 0
+
+
+# --- pipeline last-resort guard (_native_block_is_usable) ------------------
+# The classifier coercion (_coerce_overflow_kpis) is the primary site; this
+# guard catches bypass paths and REJECTS bad kpi_native blocks (assemble skips
+# them) rather than rebuilding to card_grid — see the comment at the call site.
+
+def test_native_block_guard_rejects_all_non_numeric_kpi():
+    cls = {"kpi": {"title": "x", "numbers": [
+        {"value": "Прогноз", "desc": "a"},
+        {"value": "—", "desc": "b"},
+    ]}}
+    assert _native_block_is_usable("kpi_native", cls) is False
+
+
+def test_native_block_guard_rejects_more_than_three_valid_kpi():
+    cls = {"kpi": {"title": "x", "numbers": [
+        {"value": "1", "desc": "a"},
+        {"value": "2", "desc": "b"},
+        {"value": "3", "desc": "c"},
+        {"value": "4", "desc": "d"},
+    ]}}
+    assert _native_block_is_usable("kpi_native", cls) is False

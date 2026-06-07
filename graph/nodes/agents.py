@@ -140,6 +140,33 @@ def _kpi_value_has_digit(value: Any) -> bool:
     return any(ch.isdigit() for ch in str(value))
 
 
+def _set_card_grid(
+    s: dict[str, Any],
+    header: str,
+    cards: list[dict[str, str]],
+) -> None:
+    """Re-type slide ``s`` in place as a ``card_grid`` flow native.
+
+    Single source of truth for the three card_grid construction sites (KPI
+    overflow demotion, structured-group reconstruction, text-slide diversify):
+    derives the column count from the card count, builds the canonical 11-key
+    ``flow`` dict the flow_renderer reads, and nulls the sibling native blocks
+    so only the flow survives. ``header`` is stored as-is (callers strip it).
+    """
+    ncards = len(cards)
+    cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
+    s["slide_type"] = "flow_diagram_native"
+    s["category"] = "other"
+    s["flow"] = {
+        "header": header, "subtitle": "", "preset": "card_grid",
+        "cards": cards, "columns": [], "rows": [],
+        "statement": "", "support": "", "grid": False, "cols": cols,
+        "blocks": [], "arrows": [],
+    }
+    for k in ("kpi", "chart", "table", "image"):
+        s[k] = None
+
+
 def _coerce_overflow_kpis(classification_dump: dict[str, Any]) -> int:
     """Validate ``kpi_native`` numbers and demote slides the renderer rejects.
 
@@ -184,19 +211,7 @@ def _coerce_overflow_kpis(classification_dump: dict[str, Any]) -> int:
                 }
                 for n in valid
             ]
-            ncards = len(cards)
-            cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
-            s["slide_type"] = "flow_diagram_native"
-            s["category"] = "other"
-            s["flow"] = {
-                "header": (kpi.get("title") or "").strip(),
-                "subtitle": "", "preset": "card_grid",
-                "cards": cards, "columns": [], "rows": [],
-                "statement": "", "support": "", "grid": False, "cols": cols,
-                "blocks": [], "arrows": [],
-            }
-            for k in ("kpi", "chart", "table", "image"):
-                s[k] = None
+            _set_card_grid(s, (kpi.get("title") or "").strip(), cards)
         else:
             # 1-3 valid after dropping non-numeric — keep kpi_native, filtered.
             kpi["numbers"] = valid
@@ -445,20 +460,9 @@ def _inject_visual_slides(
                     _force_image_native(s, (ps.get("title") or "").strip(), fb)
                     img_n += 1
                 continue
-            ncards = len(cards)
-            cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
             prev = s.get("flow") if isinstance(s.get("flow"), dict) else {}
             header = (prev.get("header") or ps.get("title") or "").strip()
-            s["slide_type"] = "flow_diagram_native"
-            s["category"] = "other"
-            s["flow"] = {
-                "header": header, "subtitle": "", "preset": "card_grid",
-                "cards": cards, "columns": [], "rows": [],
-                "statement": "", "support": "", "grid": False, "cols": cols,
-                "blocks": [], "arrows": [],
-            }
-            for k in ("kpi", "chart", "table", "image"):
-                s[k] = None
+            _set_card_grid(s, header, cards)
             flow_n += 1
     return {"image": img_n, "flow": flow_n}
 
@@ -557,19 +561,8 @@ def _diversify_text_slides(
         )
         if parallel < max(_F_MIN_CARDS, (len(cards) * 3 + 4) // 5):
             continue
-        ncards = len(cards)
-        cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
         header = (bs.get("raw_title") or "").strip()
-        s["slide_type"] = "flow_diagram_native"
-        s["category"] = "other"
-        s["flow"] = {
-            "header": header, "subtitle": "", "preset": "card_grid",
-            "cards": cards, "columns": [], "rows": [],
-            "statement": "", "support": "", "grid": False, "cols": cols,
-            "blocks": [], "arrows": [],
-        }
-        for k in ("kpi", "chart", "table", "image"):
-            s[k] = None
+        _set_card_grid(s, header, cards)
         promoted += 1
     return promoted
 
