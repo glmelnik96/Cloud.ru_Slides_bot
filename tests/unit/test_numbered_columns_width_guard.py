@@ -31,7 +31,12 @@ def _blank_slide():
 
 
 def _col_width_for(n: int, gap: int = 32) -> int:
-    """The exact width formula the renderer uses for ``n`` columns."""
+    """The exact width formula the renderer uses for ``n`` columns.
+
+    MUST mirror render_numbered_columns' ``cw`` formula (flow_renderer.py
+    line 1149: ``cw = int((SAFE_W - (n - 1) * gap) / n)``); update both
+    together if the formula ever changes.
+    """
     return int((SAFE_W - (n - 1) * gap) / n)
 
 
@@ -75,6 +80,58 @@ def test_min_width_violation_falls_back_to_rows():
     assert len(bases) <= 2, f"expected rows fallback, got {len(bases)} columns"
 
     # Every item survived the fallback — nothing dropped.
+    text = _all_text(slide)
+    for i in range(n):
+        assert ("%02d" % (i + 1)) in text
+        assert f"Заголовок {i}" in text
+
+
+def _run_font_sizes(slide) -> list[float]:
+    """Every run's font size in pt across all textboxes on the slide."""
+    sizes: list[float] = []
+    for s in slide.shapes:
+        if not s.has_text_frame:
+            continue
+        for p in s.text_frame.paragraphs:
+            for r in p.runs:
+                if r.font.size is not None:
+                    sizes.append(r.font.size.pt)
+    return sizes
+
+
+def test_fallback_drops_column_typography():
+    """Column-specific typography must NOT leak into the rows fallback.
+
+    A numbered_columns cfg with n>=6 (guard fires) AND an oversized column
+    ``number_size`` (56pt would be the column bottom-number; rows default is
+    17pt for the inline number). After the fallback the rendered slide must
+    contain NO run at the leaked 56pt — render_numbered_rows applies its own
+    defaults because the column-typography keys are NOT whitelisted forward.
+    """
+    n = 6
+    assert _col_width_for(n) < _MIN_COL_W  # precondition: guard must trigger
+    cols = [{"title": f"Заголовок {i}",
+             "text": "взаимодействие инфраструктура",
+             "number": "%02d" % (i + 1)} for i in range(n)]
+    slide = _blank_slide()
+    # Oversized column typography that MUST be dropped on fallback.
+    render_numbered_columns(slide, {
+        "columns": cols,
+        "number_size": 56,
+        "title_size": 40,
+        "text_size": 30,
+    })
+
+    sizes = _run_font_sizes(slide)
+    # The leaked column sizes never reach the row layout.
+    assert 56 not in sizes, "column number_size leaked into rows fallback"
+    assert 40 not in sizes, "column title_size leaked into rows fallback"
+    assert 30 not in sizes, "column text_size leaked into rows fallback"
+    # render_numbered_rows applied its OWN defaults instead (17/17/14).
+    assert 17 in sizes  # inline number + title default
+    assert 14 in sizes  # body text default
+
+    # And no content was lost in the process.
     text = _all_text(slide)
     for i in range(n):
         assert ("%02d" % (i + 1)) in text

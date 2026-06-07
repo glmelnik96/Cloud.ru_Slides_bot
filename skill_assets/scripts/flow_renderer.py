@@ -201,11 +201,14 @@ _CARD_BODY_MIN_PT = 11.0
 
 # Task 6 (numbered_columns width guard): a column must be wide enough to fit a
 # typical long Russian word at the body font (text_size≈15pt) without breaking
-# it mid-word. Measured with the brand OTF, common long words run ~150–210px at
-# 15pt; the textfit width check uses width_target=0.95, so a 180px column gives
-# ~171px of usable space — enough for the bulk of long words (взаимодействие,
-# инфраструктура ≈164px) while only the rarest outliers want a wider column.
-# Below this the renderer falls back to numbered_rows so words wrap on spaces.
+# it mid-word. render_numbered_columns draws the body via add_block with a
+# FIXED font size + word_wrap (NOT a fit-to-width textfit pass — that 0.95
+# width_target lives on the card renderer path), so a too-narrow box simply
+# breaks mid-word. Measured with the brand OTF, common long words run
+# ~150–210px at 15pt (взаимодействие, инфраструктура ≈164px); below ~180px the
+# box gets narrower than the bulk of those words and word_wrap breaks inside a
+# word. Below this the renderer falls back to numbered_rows so words wrap on
+# spaces over a taller slot instead.
 _MIN_COL_W = 180
 
 
@@ -1154,10 +1157,23 @@ def render_numbered_columns(slide, cfg, dark=False):
     # height, so nothing breaks inside a word. Threshold uses the SAME width
     # formula above, so the guard fires exactly when the columns are too narrow.
     if cw < _MIN_COL_W:
-        rows_cfg = dict(cfg)
-        rows_cfg.pop("columns", None)
-        rows_cfg["rows"] = cols_data
-        rows_cfg.setdefault("cols", 2)
+        # Build the rows cfg from an EXPLICIT WHITELIST of layout-neutral keys.
+        # numbered_columns and numbered_rows SHARE KEY NAMES with DIFFERENT
+        # defaults/meaning (columns: title_size=20/text_size=15/number_size=56
+        # big bottom number; rows: title_size=17/text_size=14/number_size=17
+        # inline number). A blind ``dict(cfg)`` would leak e.g. a 56pt column
+        # ``number_size`` into the inline row number. Only ``content_top`` is
+        # genuinely neutral (same meaning + default SAFE_TOP in both). ``cols``
+        # is forwarded only if the caller set it (render_numbered_rows reads it
+        # — numbered_columns uses ``n`` instead, so it is layout-neutral here);
+        # otherwise we default to 2. The {title,text,number} items carry over
+        # via ``rows`` so no content is lost. Column-specific typography
+        # (title_size/text_size/number_size/gap/rule/number_color) is dropped
+        # so render_numbered_rows applies its OWN defaults.
+        rows_cfg = {"rows": cols_data}
+        if "content_top" in cfg:
+            rows_cfg["content_top"] = cfg["content_top"]
+        rows_cfg["cols"] = cfg.get("cols", 2)
         render_numbered_rows(slide, rows_cfg, dark=dark)
         return
     num_h = 90
