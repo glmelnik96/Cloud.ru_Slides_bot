@@ -450,6 +450,98 @@ def _by_num(items: list[dict[str, Any]], key: str = "num") -> dict[int, dict[str
     return out
 
 
+# ─── #5 body-line recovery ───────────────────────────────────────────────────
+# The Content Distributor (Agent 03) is instructed "слотов < контента →
+# объедини … или отбрось наименее важные". When the chosen donor has fewer
+# body slots than the brief has content lines, the LLM may silently drop a
+# line (live 81673 slide 5: 3 brief lines → 2 distributed → 1 lost). The
+# prompt now says "never drop"; this deterministic safeguard is the actual
+# guarantee — it re-appends any brief body line the distributed body fails
+# to represent, so nothing is lost regardless of LLM compliance.
+
+# Source briefs encode soft line breaks as the OOXML vertical tab (\v /
+# U+000B) as well as \n; split on both so we count logical lines correctly.
+_BODY_LINE_SPLIT_RE = re.compile(r"[\n\v]+")
+# Drop distributor decoration (** key-phrase markup) and punctuation when
+# comparing — the distributor reformats copy ("…домен:" → "…домен."), so we
+# compare on a normalised word set, not verbatim text.
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _body_lines(text: str) -> list[str]:
+    """Split a body string into non-empty logical lines (\n or \v separated)."""
+    if not text:
+        return []
+    return [ln.strip() for ln in _BODY_LINE_SPLIT_RE.split(text) if ln.strip()]
+
+
+def _sig_words(text: str) -> set[str]:
+    """Lowercased word set of a line, keeping only tokens ≥3 chars so that
+    short connective words (и, в, на, the) don't inflate the overlap."""
+    return {w for w in (m.group(0).lower() for m in _WORD_RE.finditer(text)) if len(w) >= 3}
+
+
+def _line_is_covered(brief_line: str, distributed_words: set[str]) -> bool:
+    """True if the distributed body already represents ``brief_line``.
+
+    The distributor legitimately rephrases / bolds copy, so we can't match
+    verbatim. A brief line counts as covered when ≥60% of its significant
+    words appear somewhere in the distributed body's word set. Lines with no
+    significant words (pure punctuation/numbers handled elsewhere) are treated
+    as covered so we never re-append noise.
+    """
+    words = _sig_words(brief_line)
+    if not words:
+        return True
+    hit = len(words & distributed_words)
+    return hit / len(words) >= 0.6
+
+
+def _recover_dropped_body_lines(
+    brief_raw_body: list[str],
+    slots: dict[str, Any],
+    body_slot_names: list[str],
+) -> list[str]:
+    """Append brief body lines the distributed body dropped into the last
+    body slot. Mutates ``slots`` in place. Returns the list of recovered
+    lines (empty when nothing was dropped — the common, no-op case).
+
+    Guard rails (avoid over-reflowing legitimately-shorter slides):
+      • only runs when there is at least one body slot to recover into;
+      • only appends lines that are genuinely absent (word-overlap < 60%);
+      • compares line COUNTS as a fast gate — if the distributed body already
+        has ≥ as many non-empty lines as the brief, we trust the distributor
+        (it may have split/merged) and do nothing.
+    """
+    if not body_slot_names:
+        return []
+    brief_lines: list[str] = []
+    for chunk in brief_raw_body or []:
+        if isinstance(chunk, str):
+            brief_lines.extend(_body_lines(chunk))
+    if not brief_lines:
+        return []
+
+    distributed_text = "\n".join(
+        str(slots.get(name) or "") for name in body_slot_names
+    )
+    distributed_lines = _body_lines(distributed_text)
+    # Fast gate: distributor kept (or expanded) the line budget → trust it.
+    if len(distributed_lines) >= len(brief_lines):
+        return []
+
+    distributed_words = _sig_words(distributed_text)
+    missing = [bl for bl in brief_lines if not _line_is_covered(bl, distributed_words)]
+    if not missing:
+        return []
+
+    target = body_slot_names[-1]
+    existing = str(slots.get(target) or "").strip()
+    addition = "\n".join(missing)
+    slots[target] = f"{existing}\n{addition}" if existing else addition
+    return missing
+
+
 def assemble_plan_node(state: SessionState) -> dict[str, Any]:
     """Fold classification + layouts + copy-edited content + icons +
     infographics into a single ``Plan`` consumable by ``build_v9.py``.
@@ -493,12 +585,16 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
     brief_data = arts.get("brief") or {}
     brief_topic = (brief_data.get("topic") or "").strip()
     brief_slides_by_num: dict[int, str] = {}
+    brief_body_by_num: dict[int, list[str]] = {}
     for bs in (brief_data.get("slides") or []):
         if isinstance(bs, dict):
             n = bs.get("num")
             rt = (bs.get("raw_title") or "").strip()
             if isinstance(n, int) and rt:
                 brief_slides_by_num[n] = rt
+            rb = bs.get("raw_body")
+            if isinstance(n, int) and isinstance(rb, list):
+                brief_body_by_num[n] = rb
 
     cls_by_num = _by_num(classification_slides, key="num")
     lay_by_num = _by_num(layouts_slides, key="num")
@@ -595,6 +691,27 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                             num=num, donor=int(donor),
                             source="brief.raw_title" if num in brief_slides_by_num else "brief.topic",
                         )
+
+                # #5 fix (2026-06-07): recover brief body lines the Distributor
+                # dropped (live 81673 slide 5: 3 brief lines → 2 distributed,
+                # 1 lost). Append any unrepresented line into the last body slot
+                # so no source content is silently discarded.
+                body_slot_names = [
+                    name for name in slot_name_map.values()
+                    if donor_map._slot_name_to_ooxml(name) == "BODY"
+                ]
+                recovered = _recover_dropped_body_lines(
+                    brief_body_by_num.get(num) or [],
+                    slots,
+                    body_slot_names,
+                )
+                if recovered:
+                    logger.warning(
+                        "node.assemble.body_recovered",
+                        session_id=state.session_id,
+                        num=num, donor=int(donor),
+                        recovered_lines=len(recovered),
+                    )
 
                 ps = PlanSlide(
                     clone_from_slide=int(donor),
