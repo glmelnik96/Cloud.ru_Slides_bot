@@ -430,6 +430,14 @@ _CARD_SEP_RE = re.compile(r"\s+[—–-]\s+|:\s+")
 _F_MIN_CARDS = 3
 _F_MAX_CARDS = 8
 _F_PARALLEL_LEN = 90  # an item this short (no separator) still reads as a card
+# #2 (card_grid overflow): a card body must coexist with 2-8 siblings in a
+# small box (~half-width × one-of-N-rows). A body beyond ~180 chars is prose,
+# not a card caption — it overflows and clips even after shrink-to-fit. We pick
+# 180 as a middle ground: comfortable for a 2-col grid, still safe-ish for the
+# tighter 3/4-col cases (where the renderer's shrink/truncate is the backstop).
+# A single over-cap body is treated as a hard veto: it's the CVE/Памятка blob
+# pattern that motivated this fix, and forcing it into a card always clips.
+_F_CARD_BODY_MAX = 180
 
 
 def _card_from_body_item(raw: str) -> dict[str, str] | None:
@@ -494,10 +502,18 @@ def _diversify_text_slides(
         cards = [c for c in (_card_from_body_item(r) for r in raw_items) if c]
         if not (_F_MIN_CARDS <= len(cards) <= _F_MAX_CARDS):
             continue
-        # Majority must be card-shaped (separator OR short) — else it's prose.
+        # #2: a single over-long body (e.g. a 400-char CVE/Памятка blob) is a
+        # hard signal the content is prose, not parallel captions — forcing it
+        # into a card clips past the box. Decline so the slide stays a normal
+        # text slide where ALL content survives (no truncation at classify time).
+        if any(len(c["text"]) > _F_CARD_BODY_MAX for c in cards):
+            continue
+        # Majority must be card-shaped (separator within the body cap OR a short
+        # title-only item) — else it's prose.
         parallel = sum(
             1 for c in cards
-            if c["text"] or len(c["title"]) <= _F_PARALLEL_LEN
+            if (c["text"] and len(c["text"]) <= _F_CARD_BODY_MAX)
+            or len(c["title"]) <= _F_PARALLEL_LEN
         )
         if parallel < max(_F_MIN_CARDS, (len(cards) * 3 + 4) // 5):
             continue

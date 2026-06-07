@@ -103,3 +103,67 @@ def test_marker_only_lines_dropped():
     assert _card_from_body_item("   ") is None
     card = _card_from_body_item("Роль: senior разработчик")
     assert card == {"title": "Роль", "text": "senior разработчик"}
+
+
+# --- #2: long-blob bodies must NOT be routed to card_grid -------------------
+from graph.nodes.agents import _F_CARD_BODY_MAX  # noqa: E402
+
+
+def test_long_blob_card_not_card_grid():
+    """One 400-char labelled blob among 4 items → guard fails, stays text.
+
+    A 400-char body cannot coexist with siblings in a card box without
+    clipping; classification must decline card_grid and leave the slide on
+    the donor/text route so ALL content survives (no truncation here)."""
+    blob = "X" * 400
+    brief = {"slides": [{"num": 4, "raw_title": "Памятка",
+                         "raw_body": [
+                             "Порядок действий — " + blob,
+                             "Шаг два — коротко",
+                             "Шаг три — коротко",
+                             "Шаг четыре — коротко",
+                         ]}]}
+    cls = _cls([{"num": 4, "slide_type": None, "category": "text"}])
+    n = _diversify_text_slides(cls, brief)
+    assert n == 0
+    s = cls["slides"][0]
+    # Slide untouched: stays a normal text slide, content not mutated/dropped.
+    assert s["slide_type"] is None
+    assert s["category"] == "text"
+    assert "flow" not in s or s.get("flow") is None
+
+
+def test_short_clean_cards_still_card_grid():
+    """4 clean short `Label — desc` items → still becomes card_grid."""
+    brief = {"slides": [{"num": 4, "raw_title": "Преимущества",
+                         "raw_body": [
+                             "Скорость — мгновенный отклик",
+                             "Цена — выгодные тарифы",
+                             "Поддержка — режим 24/7",
+                             "SLA — гарантия доступности",
+                         ]}]}
+    cls = _cls([{"num": 4, "slide_type": None, "category": "text"}])
+    n = _diversify_text_slides(cls, brief)
+    assert n == 1
+    assert cls["slides"][0]["flow"]["preset"] == "card_grid"
+
+
+def test_card_body_length_boundary():
+    """Body just at the cap is fine; one body over the cap vetoes the grid.
+
+    With 4 items, 3 are short clean cards and 1 carries a borderline body.
+    At the cap the grid still forms; a single over-cap blob (the CVE/Памятка
+    pattern) is a hard signal the content is prose → decline so nothing clips."""
+    short3 = ["A — короткий", "B — короткий", "C — короткий"]
+
+    at_cap = "y" * _F_CARD_BODY_MAX
+    brief_u = {"slides": [{"num": 4, "raw_title": "T",
+                           "raw_body": short3 + ["D — " + at_cap]}]}
+    cls_u = _cls([{"num": 4, "slide_type": None, "category": "text"}])
+    assert _diversify_text_slides(cls_u, brief_u) == 1
+
+    over = "y" * (_F_CARD_BODY_MAX + 1)
+    brief_o = {"slides": [{"num": 4, "raw_title": "T",
+                           "raw_body": short3 + ["D — " + over]}]}
+    cls_o = _cls([{"num": 4, "slide_type": None, "category": "text"}])
+    assert _diversify_text_slides(cls_o, brief_o) == 0

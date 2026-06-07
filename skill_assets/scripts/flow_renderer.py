@@ -194,6 +194,11 @@ SAFE_RIGHT = 1245
 SAFE_W = SAFE_RIGHT - SAFE_LEFT   # 1210
 SAFE_H = SAFE_BOTTOM - SAFE_TOP    # 520
 
+# #2 (card_grid overflow): floor for shrink-to-fit of a card body. Below ~11pt
+# card text is unreadable; if it still won't fit at this size we truncate with
+# an ellipsis rather than render illegibly small or let it clip off the box.
+_CARD_BODY_MIN_PT = 11.0
+
 
 # ============================================================================
 # Низкоуровневые примитивы (можно импортировать отдельно для кастомных схем)
@@ -811,6 +816,66 @@ def _real_lines(text, usable_w_px, font_pt, bold=False):
     return _wrapped_lines(text, usable_w_px, 0.58 * font_pt * 4.0 / 3.0)
 
 
+def _fit_card_body(text, box_w_px, box_h_px, base_pt, bold=False):
+    """#2: fit a card body into its box — shrink first, truncate as last resort.
+
+    Returns ``(size_pt, text)``. Pure: no PPTX side effects, so it can be unit
+    tested. Behaviour:
+
+      * No-op for short text that already fits at ``base_pt`` (size == base,
+        text unchanged) — the common case must stay untouched.
+      * Otherwise shrink the font from ``base_pt`` toward ``_CARD_BODY_MIN_PT``
+        (textfit, real font metrics) so the wrapped block fits ``box_h_px``.
+      * If even at the min size the text overflows the box, truncate on word
+        boundaries and append an ellipsis so nothing clips off the card.
+
+    Falls back to ``(base_pt, text)`` unchanged when textfit is unavailable or
+    geometry is degenerate (current pre-#2 behaviour)."""
+    text = str(text or "")
+    if not GEOFIT_AVAILABLE or not text.strip() or box_w_px <= 0 or box_h_px <= 0:
+        return base_pt, text
+    fp = _font_resolver.resolve(FONT, bold)
+    if not fp:
+        return base_pt, text
+    try:
+        res = _textfit.fit_text(
+            text,
+            box_w_emu=int(box_w_px * EMU),
+            box_h_emu=int(box_h_px * EMU),
+            font_path=fp,
+            base_pt=float(base_pt),
+            min_pt=_CARD_BODY_MIN_PT,
+            wrap=True,
+            balance=False,
+        )
+    except Exception:
+        return base_pt, text
+    if res is None:
+        return base_pt, text
+    size = res.size_pt
+
+    # Does it fit at the chosen size? Capacity = floor(box_h / line_height).
+    def _fits(s, t):
+        lines, longest, _h = _textfit._measure(t, fp, s, int(box_w_px), True)
+        px = s * 4.0 / 3.0
+        cap = max(1, int(box_h_px / (px * 1.25)))
+        return longest <= box_w_px and len(lines) <= cap
+
+    if _fits(size, text):
+        return size, text
+
+    # Last resort: at the min size, drop trailing words until it fits, then add
+    # an ellipsis. Word-boundary truncation keeps the tail readable.
+    size = _CARD_BODY_MIN_PT
+    words = text.split()
+    while words:
+        candidate = " ".join(words) + "…"
+        if _fits(size, candidate):
+            return size, candidate
+        words.pop()
+    return size, "…"
+
+
 def compose_grid(blocks, area, cols=None, font_pt=16, gap=24,
                  pad=12, pad_bottom=16, v_center=True):
     """Грид-композиция блоков схемы (frame-to-text + сетка + единый кегль).
@@ -1035,18 +1100,28 @@ def render_card_grid(slide, cfg, dark=False):
             # высота заголовка под РЕАЛЬНОЕ число строк (метрики шрифта) —
             # эвристика по символам недосчитывала строки кириллицы и тело
             # наезжало на 3-строчный заголовок (дефект E).
-            t_lines = _real_lines(title, tw, title_size, bold=True)
-            t_h = int(t_lines * 1.25 * title_size * 4.0 / 3.0) + 4
+            t_size = title_size
+            if title:
+                # #2: a long title must not push the body off-box. Cap its
+                # height at ~half the card and shrink-to-fit within that cap.
+                t_cap = max(title_size, (ch - 2 * pad) // 2)
+                t_size, title = _fit_card_body(
+                    title, tw, t_cap, title_size, bold=True)
+            t_lines = _real_lines(title, tw, t_size, bold=True)
+            t_h = int(t_lines * 1.25 * t_size * 4.0 / 3.0) + 4
             if title:
                 add_label(slide, tx, y + pad, tw, t_h, title,
-                          font_size=title_size, bold=True,
+                          font_size=t_size, bold=True,
                           anchor="top", color=title_col)
             body_y = y + pad + t_h + 6
             body_x, body_w = tx, tw
         if text:
-            add_label(slide, body_x, body_y, body_w,
-                      y + ch - body_y - pad, text,
-                      font_size=text_size, bold=False,
+            body_h = y + ch - body_y - pad
+            # #2: shrink the body font to fit its box; truncate with an ellipsis
+            # only if even the min size overflows. No-op for short bodies.
+            b_size, text = _fit_card_body(text, body_w, body_h, text_size)
+            add_label(slide, body_x, body_y, body_w, body_h, text,
+                      font_size=b_size, bold=False,
                       anchor="top", color=body_col)
 
 
