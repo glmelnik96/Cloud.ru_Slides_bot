@@ -464,8 +464,32 @@ def _by_num(items: list[dict[str, Any]], key: str = "num") -> dict[int, dict[str
 _BODY_LINE_SPLIT_RE = re.compile(r"[\n\v]+")
 # Drop distributor decoration (** key-phrase markup) and punctuation when
 # comparing — the distributor reformats copy ("…домен:" → "…домен."), so we
-# compare on a normalised word set, not verbatim text.
+# tokenise on word characters only.
+#
+# NOTE: we use a LOCAL tokeniser instead of reusing
+# ``skill_assets/scripts/text_sanitize.sanitize_text``. That helper lives in
+# the vendored skill scripts dir which is only on ``sys.path`` inside the
+# worker/skill-bridge subprocess (see build_v9.py:422 — a deferred import),
+# not when this host node module imports at top level. Pulling it in here
+# would add a fragile cross-package dependency. Our need is narrower anyway —
+# strip markdown emphasis + punctuation and tokenise — so a self-contained
+# regex is clearer and import-safe. ``\w+`` already discards ``*`` / ``**``
+# and punctuation, so no separate markdown pass is required.
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+# Tuning constants for the body-recovery matcher (#5). Promoted from magic
+# numbers so the false-positive/false-negative trade-off is reviewable.
+_MIN_SIG_WORD_LEN = 3          # ignore short connectives (и, в, на, the…)
+# A brief line is "covered" by a distributed line when their significant-word
+# overlap, measured against the BRIEF line, reaches this ratio. Per-line (not
+# pooled) so scattered shared words across other lines can't mask a real drop.
+_COVERAGE_THRESHOLD = 0.6
+# When re-appending a supposedly-dropped line, suppress it if it is a near
+# duplicate / subset of an existing distributed line. Measured as the share of
+# the DISTRIBUTED line's words that the brief candidate also contains — i.e.
+# "is some kept line essentially a subset of this candidate?" — neutralising
+# the rephrase/merge double-content risk from a different angle than coverage.
+_DUPLICATE_THRESHOLD = 0.6
 
 
 def _body_lines(text: str) -> list[str]:
@@ -476,25 +500,35 @@ def _body_lines(text: str) -> list[str]:
 
 
 def _sig_words(text: str) -> set[str]:
-    """Lowercased word set of a line, keeping only tokens ≥3 chars so that
-    short connective words (и, в, на, the) don't inflate the overlap."""
-    return {w for w in (m.group(0).lower() for m in _WORD_RE.finditer(text)) if len(w) >= 3}
+    """Lowercased significant-word set of a line.
 
-
-def _line_is_covered(brief_line: str, distributed_words: set[str]) -> bool:
-    """True if the distributed body already represents ``brief_line``.
-
-    The distributor legitimately rephrases / bolds copy, so we can't match
-    verbatim. A brief line counts as covered when ≥60% of its significant
-    words appear somewhere in the distributed body's word set. Lines with no
-    significant words (pure punctuation/numbers handled elsewhere) are treated
-    as covered so we never re-append noise.
+    Keeps only tokens ≥ ``_MIN_SIG_WORD_LEN`` chars so short connective words
+    don't inflate overlap. ``\\w+`` strips markdown (``**``/``*``) and
+    punctuation, normalising distributor decoration before comparison.
     """
-    words = _sig_words(brief_line)
-    if not words:
-        return True
-    hit = len(words & distributed_words)
-    return hit / len(words) >= 0.6
+    return {
+        w for w in (m.group(0).lower() for m in _WORD_RE.finditer(text))
+        if len(w) >= _MIN_SIG_WORD_LEN
+    }
+
+
+def _max_line_overlap(brief_words: set[str],
+                      distributed_line_words: list[set[str]]) -> float:
+    """Best per-line overlap ratio of ``brief_words`` against ANY single
+    distributed line (NOT a global pooled set). Ratio is over the brief line's
+    own significant words, so a brief line counts as represented only when one
+    distributed line carries most of its content — scattered shared words
+    across different lines can't add up to a false match."""
+    if not brief_words:
+        return 1.0  # no significant content → treat as represented (noise-safe)
+    best = 0.0
+    for dwords in distributed_line_words:
+        if not dwords:
+            continue
+        ratio = len(brief_words & dwords) / len(brief_words)
+        if ratio > best:
+            best = ratio
+    return best
 
 
 def _recover_dropped_body_lines(
@@ -502,16 +536,32 @@ def _recover_dropped_body_lines(
     slots: dict[str, Any],
     body_slot_names: list[str],
 ) -> list[str]:
-    """Append brief body lines the distributed body dropped into the last
-    body slot. Mutates ``slots`` in place. Returns the list of recovered
-    lines (empty when nothing was dropped — the common, no-op case).
+    """Append GENUINELY-dropped brief body lines into the last body slot.
+    Mutates ``slots`` in place. Returns the recovered lines (empty in the
+    common no-op case).
 
-    Guard rails (avoid over-reflowing legitimately-shorter slides):
-      • only runs when there is at least one body slot to recover into;
-      • only appends lines that are genuinely absent (word-overlap < 60%);
-      • compares line COUNTS as a fast gate — if the distributed body already
-        has ≥ as many non-empty lines as the brief, we trust the distributor
-        (it may have split/merged) and do nothing.
+    Matcher (per-line + distinctive-token, with two anti-duplication gates):
+      • Tokenise each distributed line separately; coverage of a brief line is
+        its MAX overlap against any SINGLE distributed line, never a pooled
+        set. This kills false positives where a dropped line's common words
+        happen to be scattered across the kept lines (IMPORTANT 1).
+      • A brief line is "covered" — and so NOT re-appended — when that max
+        overlap ≥ ``_COVERAGE_THRESHOLD`` (treats reformat/light-edit as kept).
+      • WHOLESALE-REPHRASE gate (CRITICAL 2): we only recover when at least one
+        OTHER brief line is strongly covered (an anchor proving the distributor
+        worked line-by-line — kept some lines and dropped this one). When NO
+        brief line is strongly covered yet the line count shrank, the
+        distributor MERGED/COMPRESSED everything into a reworded line; its
+        surface words barely overlap any original, so re-appending originals
+        would duplicate the merged meaning. In that case we trust the
+        distributor and recover nothing.
+      • DUPLICATE/SUBSET gate: even with an anchor, suppress a candidate drop
+        if some distributed line is largely a subset of it (overlap ≥
+        ``_DUPLICATE_THRESHOLD``) — it would re-introduce kept content.
+
+    Guard rails: needs ≥1 body slot; fast-gates out when the distributed body
+    already has ≥ as many non-empty lines as the brief (distributor split/kept
+    the budget → trust it).
     """
     if not body_slot_names:
         return []
@@ -530,8 +580,34 @@ def _recover_dropped_body_lines(
     if len(distributed_lines) >= len(brief_lines):
         return []
 
-    distributed_words = _sig_words(distributed_text)
-    missing = [bl for bl in brief_lines if not _line_is_covered(bl, distributed_words)]
+    distributed_line_words = [_sig_words(dl) for dl in distributed_lines]
+
+    # Pre-compute per-brief-line coverage so we can apply the wholesale-rephrase
+    # anchor gate before deciding what (if anything) to recover.
+    coverage = [
+        _max_line_overlap(_sig_words(bl), distributed_line_words)
+        for bl in brief_lines
+    ]
+    has_anchor = any(ov >= _COVERAGE_THRESHOLD for ov in coverage)
+    if not has_anchor:
+        # No 1:1 anchor → distributor compressed/rephrased wholesale; recovering
+        # originals would duplicate the merged meaning (CRITICAL 2). Trust it.
+        return []
+
+    missing: list[str] = []
+    for bl, overlap in zip(brief_lines, coverage):
+        if overlap >= _COVERAGE_THRESHOLD:
+            continue  # already represented (kept / lightly reformatted)
+        bwords = _sig_words(bl)
+        # Duplicate/subset gate: skip if any distributed line is largely a
+        # subset of this candidate — it would re-introduce kept content.
+        if any(
+            dwords and len(bwords & dwords) / len(dwords) >= _DUPLICATE_THRESHOLD
+            for dwords in distributed_line_words
+        ):
+            continue
+        missing.append(bl)
+
     if not missing:
         return []
 
@@ -696,12 +772,29 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                 # dropped (live 81673 slide 5: 3 brief lines → 2 distributed,
                 # 1 lost). Append any unrepresented line into the last body slot
                 # so no source content is silently discarded.
+                #
+                # Brief lookup must mirror the established split-renumber
+                # convention (agents.py:206 et al). The classifier SPLITS long
+                # brief slides and CONTINUES the numeration, so deck ``num`` no
+                # longer aligns with brief ``num`` after any split:
+                #   • _split_part set → this slide is a FRAGMENT of a split brief
+                #     slide whose body is divided across deck slides; per-part
+                #     recovery is unsafe (we can't attribute brief lines to a
+                #     fragment) → skip recovery entirely.
+                #   • otherwise key off _source_slide (falls back to num) so we
+                #     compare against the CORRECT brief slide, never a foreign
+                #     one (avoids cross-slide contamination after a split).
                 body_slot_names = [
                     name for name in slot_name_map.values()
                     if donor_map._slot_name_to_ooxml(name) == "BODY"
                 ]
+                if cls.get("_split_part"):
+                    brief_body_for_recovery: list[str] = []
+                else:
+                    src = cls.get("_source_slide") or num
+                    brief_body_for_recovery = brief_body_by_num.get(src) or []
                 recovered = _recover_dropped_body_lines(
-                    brief_body_by_num.get(num) or [],
+                    brief_body_for_recovery,
                     slots,
                     body_slot_names,
                 )

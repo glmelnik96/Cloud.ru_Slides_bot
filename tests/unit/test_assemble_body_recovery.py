@@ -8,10 +8,12 @@ line ("пользовательский домен, привязанный к б
 plan.json and the rendered PNG showed 2 bullets.
 
 The fix: a deterministic safeguard in assemble_plan_node. When a donor
-slide's distributed body has FEWER non-empty lines than the brief body
-for that slide, the missing brief lines are appended (\n-joined) to the
-last body slot — content is never lost. Slides whose distributed body
-already covers the brief are left untouched (no over-reflow).
+slide's distributed body omits a genuinely-dropped brief line, that line
+is appended (\n-joined) to the last body slot — content is never lost.
+The matcher is per-distributed-line + distinctive-token based and guards
+against re-appending content the distributor merely rephrased/merged
+(no duplication), and skips split-brief fragments to avoid cross-slide
+contamination.
 """
 from __future__ import annotations
 
@@ -34,20 +36,37 @@ def _make_state(artefacts: dict[str, Any]) -> SessionState:
     return s.model_copy(update={"artefacts": dict(artefacts)})
 
 
-def _artefacts(*, raw_body: list[str], body_content: str,
-               num: int = 5, donor: int = 21) -> dict[str, Any]:
+def _artefacts(
+    *,
+    raw_body: list[str],
+    body_content: str,
+    num: int = 5,
+    donor: int = 21,
+    brief_num: int | None = None,
+    cls_extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Single-slide donor bundle. Donor 21 = title(shape_idx 0) +
-    body(shape_idx 1) — a single body slot (see donor-slot-map.yaml)."""
+    body(shape_idx 1) — a single body slot (see donor-slot-map.yaml).
+
+    ``brief_num`` lets the brief slide carry a different num than the deck
+    slide (to model post-split renumbering). ``cls_extra`` merges extra
+    keys into the classification slide (e.g. ``_split_part`` /
+    ``_source_slide``).
+    """
+    bnum = brief_num if brief_num is not None else num
+    cls_slide: dict[str, Any] = {
+        "num": num, "category": "text",
+        "subcategory_hint": "", "rationale": "",
+    }
+    if cls_extra:
+        cls_slide.update(cls_extra)
     return {
         "brief": {
             "topic": "Deck",
             "slide_count": 1,
-            "slides": [{"num": num, "raw_title": "OBS", "raw_body": raw_body}],
+            "slides": [{"num": bnum, "raw_title": "OBS", "raw_body": raw_body}],
         },
-        "classification": {
-            "slides": [{"num": num, "category": "text",
-                        "subcategory_hint": "", "rationale": ""}],
-        },
+        "classification": {"slides": [cls_slide]},
         "layouts": {"slides": [{"num": num, "layout_idx": donor}]},
         "content": {
             "slides": [{
@@ -64,8 +83,9 @@ def _artefacts(*, raw_body: list[str], body_content: str,
 
 
 def test_dropped_brief_line_is_recovered_into_body(monkeypatch) -> None:
-    """The reproduction: brief has 3 body lines, distributor kept 2.
-    The 3rd must be recovered into the body slot — no content lost."""
+    """The 81673 reproduction: brief has 3 body lines, distributor kept 2
+    (reformatted, not rephrased). The 3rd genuinely-missing line must be
+    recovered into the body slot — and ONLY that one line."""
     monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
     raw_body = [
         "HTTPS-доступ к бакетам через собственный домен:\n\n"
@@ -86,21 +106,21 @@ def test_dropped_brief_line_is_recovered_into_body(monkeypatch) -> None:
     # The two kept lines survive too.
     assert "HTTPS-доступ к бакетам" in body
     assert "CCM" in body
-    # All three source lines are now represented (≥3 non-empty body lines).
+    # Exactly ONE line recovered → 3 non-empty body lines (no over-reflow).
     non_empty = [ln for ln in body.split("\n") if ln.strip()]
-    assert len(non_empty) >= 3
+    assert len(non_empty) == 3
 
 
 def test_body_fully_covered_is_left_untouched(monkeypatch) -> None:
     """No-op: a slide whose distributed body already covers every brief
     line must NOT be reflowed — exact content preserved."""
     monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
-    raw_body = ["Первый пункт\nВторой пункт"]
-    body_content = "Первый пункт.\nВторой пункт."
+    raw_body = ["Первый уникальный пункт\nВторой особенный пункт"]
+    body_content = "Первый уникальный пункт.\nВторой особенный пункт."
     state = _make_state(_artefacts(raw_body=raw_body, body_content=body_content))
     out = assemble_plan_node(state)
     body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
-    assert body == "Первый пункт.\nВторой пункт."
+    assert body == "Первый уникальный пункт.\nВторой особенный пункт."
 
 
 def test_fewer_brief_lines_than_body_is_noop(monkeypatch) -> None:
@@ -116,3 +136,123 @@ def test_fewer_brief_lines_than_body_is_noop(monkeypatch) -> None:
     out = assemble_plan_node(state)
     body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
     assert body == body_content
+
+
+# ── Review-mandated correctness cases ──────────────────────────────────────
+
+
+def test_false_positive_shared_words_dropped_line_recovered(monkeypatch) -> None:
+    """IMPORTANT 1 — pooled-word false positive.
+
+    Two brief lines share common ≥3-char domain words ("бакет", "доступ").
+    One line is genuinely dropped. A pooled bag-of-words matcher would see
+    the shared words scattered across the kept line and mark the dropped
+    line "covered" → silent loss. Per-line matching against a distinctive
+    token must still recover it.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Доступ к бакету по протоколу HTTPS\n"
+        "Доступ к бакету через приватную сеть VPC"
+    ]
+    # Distributor kept ONLY the first line; the VPC line is genuinely dropped.
+    # Its shared words (доступ, бакету) all appear in the kept line, but its
+    # distinctive tokens (приватную, сеть, VPC) do not.
+    body_content = "Доступ к бакету по протоколу HTTPS."
+    state = _make_state(_artefacts(raw_body=raw_body, body_content=body_content))
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    assert "приватную сеть" in body or "VPC" in body
+    non_empty = [ln for ln in body.split("\n") if ln.strip()]
+    assert len(non_empty) == 2
+
+
+def test_rephrase_merge_produces_no_duplication(monkeypatch) -> None:
+    """CRITICAL 2 — legitimate rephrase/merge must NOT be re-appended.
+
+    The distributor compresses two brief lines into one shorter rephrased
+    line with low surface-word overlap. The originals must NOT be appended
+    (no duplicate/redundant content), even though raw word-overlap is low.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Пользовательский домен привязанный к бакету\n"
+        "Сертификат выпускается автоматически системой"
+    ]
+    # One rephrased/merged line, surface overlap with each original is low.
+    body_content = "Поддержка кастомных доменов и автоматических SSL для бакетов."
+    state = _make_state(_artefacts(raw_body=raw_body, body_content=body_content))
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    # The rephrased line stands alone — no original verbatim re-appended.
+    assert "Пользовательский домен привязанный" not in body
+    assert "Сертификат выпускается автоматически" not in body
+    assert body == body_content
+
+
+def test_split_part_slide_is_skipped(monkeypatch) -> None:
+    """CRITICAL 1 — split-brief fragments must be skipped.
+
+    A classification slide carrying ``_split_part`` is a fragment of a
+    brief slide whose body is divided across multiple deck slides. Per-part
+    recovery is unsafe (we can't tell which fragment owns which brief line),
+    so recovery must not run — body stays exactly as distributed.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = ["Линия А\nЛиния Б\nЛиния В"]
+    body_content = "Линия А."
+    state = _make_state(_artefacts(
+        raw_body=raw_body, body_content=body_content,
+        cls_extra={"_split_part": 1, "_source_slide": 5},
+    ))
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    assert body == "Линия А."
+
+
+def test_post_split_renumber_keys_off_source_slide(monkeypatch) -> None:
+    """CRITICAL 1 — non-split slides key off ``_source_slide``.
+
+    After an earlier split renumbered downstream slides, the deck ``num``
+    no longer matches the brief ``num``. Recovery must look up the brief by
+    ``_source_slide`` (the original brief num), NOT the shifted deck num —
+    otherwise we'd compare against the wrong brief slide and could append a
+    FOREIGN brief line (contamination).
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    # Deck slide num=6 (shifted), but it maps back to brief slide num=5.
+    raw_body = [
+        "Уникальная фраза один альфа\nУникальная фраза два бета"
+    ]
+    body_content = "Уникальная фраза один альфа."
+    state = _make_state(_artefacts(
+        raw_body=raw_body, body_content=body_content,
+        num=6, brief_num=5,
+        cls_extra={"_source_slide": 5},
+    ))
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    # The genuinely-dropped second line (looked up via _source_slide=5) is
+    # recovered — proving the lookup keyed off _source_slide, not num=6.
+    assert "два бета" in body
+    non_empty = [ln for ln in body.split("\n") if ln.strip()]
+    assert len(non_empty) == 2
+
+
+def test_no_foreign_contamination_when_source_slide_absent(monkeypatch) -> None:
+    """CRITICAL 1 — guard: if the keyed brief slide has no body, nothing is
+    appended (no foreign content pulled from a mis-keyed slide)."""
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    # Brief slide num=5 exists but the deck slide maps to a brief num (99)
+    # that has no entry → empty brief body → no recovery, no contamination.
+    raw_body = ["Эта линия принадлежит слайду 5"]
+    body_content = "Совершенно другой контент."
+    state = _make_state(_artefacts(
+        raw_body=raw_body, body_content=body_content,
+        num=6, brief_num=5,
+        cls_extra={"_source_slide": 99},
+    ))
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    assert body == "Совершенно другой контент."
+    assert "принадлежит слайду 5" not in body
