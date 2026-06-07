@@ -1106,7 +1106,7 @@ def distribute_node(state: SessionState) -> dict[str, Any]:
 # Distributor outputs a deck-level wrapper {"slides": [ContentAssignment, ...]}.
 # schemas/slides.py defines ContentAssignment per-slide; declare the wrapper
 # locally so we don't pollute the public schema module.
-from pydantic import BaseModel, ConfigDict, Field  # noqa: E402 — co-located helper
+from pydantic import BaseModel, ConfigDict, Field, ValidationError  # noqa: E402 — co-located helper
 
 
 class _DeckContentAssignment(BaseModel):
@@ -1156,13 +1156,31 @@ def icons_node(state: SessionState) -> dict[str, Any]:
 def infographic_node(state: SessionState) -> dict[str, Any]:
     _emit(state, Stage.DESIGNING, pct=65, detail="инфографика")
     arts = _artefacts(state)
-    infographics, _ = call_and_parse(
-        role=Role.INFOGRAPHIC_MAKER,
-        messages=agent_06_infographic_maker.build_messages(
-            arts["classification"], arts["content"],
-        ),
-        model_cls=_DeckInfographics,
-    )
+    try:
+        infographics, _ = call_and_parse(
+            role=Role.INFOGRAPHIC_MAKER,
+            messages=agent_06_infographic_maker.build_messages(
+                arts["classification"], arts["content"],
+            ),
+            model_cls=_DeckInfographics,
+        )
+    except (ValueError, ValidationError) as e:
+        # Infographics are a cosmetic enrichment step. A malformed/truncated
+        # LLM reply (call_and_parse already auto-bumps tokens + retries once
+        # before raising — real incident: GLM-5.1 truncated JSON at char
+        # ~15135) must NOT take down the whole deck. Degrade to an empty
+        # infographics set: assemble_plan_node tolerates an empty/absent
+        # 'infographics' artefact (info_by_num lookups return {} and it only
+        # attaches shapes when infographic_type not in (None, "none")), so
+        # slides build as plain donor slides without infographic shapes.
+        arts["infographics"] = _DeckInfographics(slides=[]).model_dump()
+        logger.warning(
+            "node.infographic.fallback_empty",
+            session_id=state.session_id,
+            error=str(e)[:300],
+        )
+        return {"artefacts": arts, "stage": Stage.DESIGNING.value,
+                "progress_pct": 70}
     arts["infographics"] = infographics.model_dump()
     logger.info("node.infographic.done", session_id=state.session_id,
                 slides=len(infographics.slides))
