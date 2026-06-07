@@ -23,13 +23,19 @@ from bot.handlers.resume import resume
 from bot.handlers.start import mode_picked, start
 from bot.handlers.verstai import verstai
 from bot.logging_setup import configure_logging
+from bot.queue_dispatch import recover_queue_on_startup
 
 logger = structlog.get_logger(__name__)
 
 
 def build_app() -> Application:
     settings = get_settings()
-    app = ApplicationBuilder().token(settings.telegram_bot_token).build()
+    app = (
+        ApplicationBuilder()
+        .token(settings.telegram_bot_token)
+        .post_init(recover_queue_on_startup)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(mode_picked, pattern=r"^mode:"))
     app.add_handler(CommandHandler("verstai", verstai))

@@ -10,6 +10,10 @@ cycle through the progress subscriber.
 """
 from __future__ import annotations
 
+import os
+import tempfile
+from pathlib import Path
+
 import structlog
 from telegram.ext import Application
 
@@ -17,14 +21,25 @@ from bot.handlers.progress import start_subscriber
 from bot.jobs import (
     claim_global_lock,
     dequeue_job,
+    enqueue_job,
+    get_active_session,
+    load_job,
     queue_length,
     release_global_lock,
     requeue_front,
     save_job,
 )
-from schemas.session import ProgressEvent, SessionInput
+from schemas.session import Mode, ProgressEvent, SessionInput
 
 logger = structlog.get_logger(__name__)
+
+# Same shared inputs volume the bot downloads uploads into (see
+# bot/handlers/verstai.py). Defined here too — importing it from verstai would
+# create a cycle (verstai imports this module for ``make_on_terminal``).
+_INPUTS_ROOT = Path(
+    os.environ.get("SLIDESBOT_INPUTS_DIR")
+    or (Path(tempfile.gettempdir()) / "slidesbot" / "inputs")
+)
 
 
 def make_on_terminal(app: Application):
@@ -38,6 +53,62 @@ def make_on_terminal(app: Application):
         await dispatch_next(app)
 
     return _on_terminal
+
+
+def requeue_interrupted(session_id: str) -> str | None:
+    """Re-enqueue an orphaned (locked-but-no-subscriber) job at the queue TAIL
+    as a FRESH session, reusing its already-downloaded input file.
+
+    Used by startup recovery: a restart drops every in-memory subscriber, so the
+    job that held the run-slot can never reach its terminal event — we reprocess
+    it from scratch, but behind whatever was already waiting (per the operator's
+    "put the interrupted one at the end" instruction). A fresh ``session_id``
+    avoids colliding with the dead run's RedisSaver checkpoint. Returns the new
+    session_id, or None when the job metadata or input file is gone.
+    """
+    job = load_job(session_id)
+    if job is None:
+        logger.warning("queue.recover.no_job", session_id=session_id)
+        return None
+    input_path = _INPUTS_ROOT / f"{session_id}.pptx"
+    if not input_path.exists():
+        logger.warning("queue.recover.no_input",
+                       session_id=session_id, path=str(input_path))
+        return None
+    inp = SessionInput(
+        user_id=job["user_id"],
+        chat_id=job["chat_id"],
+        progress_message_id=job["message_id"],
+        mode=Mode(job["mode"]),
+        input_s3_key=str(input_path),
+    )
+    enqueue_job({
+        "session_id": inp.session_id,
+        "user_id": job["user_id"],
+        "chat_id": job["chat_id"],
+        "message_id": job["message_id"],
+        "input_json": inp.model_dump(mode="json"),
+    })
+    logger.info("queue.recover.requeued_interrupted",
+                old_session=session_id, new_session=inp.session_id)
+    return inp.session_id
+
+
+async def recover_queue_on_startup(app: Application) -> None:
+    """PTB ``post_init`` hook: resume a queue stranded by a bot restart.
+
+    No subscriber survives a restart, so any held global lock is orphaned — its
+    ``on_terminal`` (lock-release + queue advance) will never fire. Re-queue the
+    interrupted job at the TAIL, free the slot, then dispatch the head so the
+    backlog drains. Runs before polling starts, so there's no submission race.
+    """
+    active = get_active_session()
+    if active is not None:
+        requeue_interrupted(active)
+        release_global_lock(active)
+        logger.info("queue.recover.lock_released", session_id=active)
+    if get_active_session() is None and queue_length() > 0:
+        await dispatch_next(app)
 
 
 async def dispatch_next(app: Application) -> None:

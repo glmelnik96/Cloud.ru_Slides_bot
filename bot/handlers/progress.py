@@ -43,7 +43,16 @@ def cancel_keyboard(session_id: str) -> InlineKeyboardMarkup:
 
 async def _edit(app: Application, *, chat_id: int, message_id: int,
                 text: str, keyboard: InlineKeyboardMarkup | None) -> None:
-    """Edit message, ignoring 'not modified' from Telegram."""
+    """Edit the progress message, best-effort.
+
+    A progress edit is purely cosmetic, but the subscriber that calls it owns
+    lock-release + queue advance + result delivery on the terminal event. So NO
+    Telegram error may propagate out of here: a transient ``TimedOut`` /
+    ``NetworkError`` on a mid-run edit, or a ``BadRequest`` because the user
+    deleted the status message, must not kill the subscriber and strand the
+    whole pending queue (incident 2026-06-07). All failures are swallowed and
+    logged; "not modified" is the expected debounce no-op and stays quiet.
+    """
     try:
         await app.bot.edit_message_text(
             chat_id=chat_id,
@@ -55,7 +64,11 @@ async def _edit(app: Application, *, chat_id: int, message_id: int,
     except BadRequest as e:
         if "not modified" in str(e).lower():
             return
-        raise
+        logger.warning("progress.edit_failed", error=str(e), chat_id=chat_id)
+    except TelegramError as e:
+        # Any other Telegram-side failure (TimedOut, NetworkError, RetryAfter,
+        # Forbidden…) is non-fatal for a cosmetic edit — log and carry on.
+        logger.warning("progress.edit_failed", error=str(e), chat_id=chat_id)
 
 
 async def subscribe(app: Application, *, session_id: str, chat_id: int,
