@@ -41,6 +41,8 @@ except ImportError:
     print("ERROR: PyYAML required. pip3 install --user pyyaml", file=sys.stderr)
     sys.exit(1)
 
+from text_sanitize import sanitize_text
+
 
 def load_donor_map(path):
     with open(path, encoding="utf-8") as f:
@@ -130,6 +132,11 @@ def replace_text_with_style(text_frame, new_text, style_override=None):
 
     # Конвертируем \x0b (vertical tab) в \n
     new_text = new_text.replace("\v", "\n").replace("\x0b", "\n")
+    # Sanitize residual control chars that would otherwise render as _X000B_
+    # & co. strip_markdown=False: this donor body/title text is later passed to
+    # kpi_emphasis.apply_kpi_emphasis (build_v9 final pass), which consumes
+    # ``**…**`` itself — stripping markdown here would break KPI/phrase emphasis.
+    new_text = sanitize_text(new_text, strip_markdown=False)
     lines = new_text.split("\n")
     if not lines:
         lines = [""]

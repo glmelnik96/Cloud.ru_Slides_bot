@@ -33,6 +33,8 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Pt
 
+from text_sanitize import sanitize_text
+
 try:
     import textfit as _textfit
     import font_resolver as _font_resolver
@@ -133,7 +135,10 @@ def _set_textframe(tf, text: str, font: str | None, size_pt: Any,
     for r in list(p.runs):
         r.text = ""
     run = p.add_run() if not p.runs else p.runs[0]
-    run.text = text or ""
+    # strip_markdown=False: infographic overlays sit on regular slides that the
+    # apply_kpi_emphasis phrase pass still visits, which consumes ``**…**``
+    # itself — only remove control chars here (fixes _X000B_), leave ** to it.
+    run.text = sanitize_text(text or "", strip_markdown=False)
     if font:
         run.font.name = font
     try:

@@ -23,6 +23,8 @@ from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_LABEL_POSITION
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
 
+from text_sanitize import sanitize_text
+
 
 def _hex_to_rgb_color(hx):
     h = hx.lstrip("#")
@@ -237,7 +239,9 @@ def add_chart_to_slide(slide, chart_config, left, top, width, height, dark=False
 
     if chart_config.get("title"):
         chart.has_title = True
-        chart.chart_title.text_frame.text = chart_config["title"]
+        # Chart title lives inside the chart graphicFrame, which
+        # apply_kpi_emphasis does not visit — ** here is a pure leak; strip it.
+        chart.chart_title.text_frame.text = sanitize_text(chart_config["title"])
         _style_text(chart.chart_title.text_frame, color=text_color, size_pt=14, bold=True)
     else:
         chart.has_title = False

@@ -34,6 +34,8 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 
+from text_sanitize import sanitize_text
+
 
 def _load_template_version():
     """Грузит brand/template-version.json (маппинг slide-индексов). Fallback — None."""
@@ -113,7 +115,10 @@ def _add_text_box(slide, left_px, top_px, width_px, height_px, text,
     p = tf.paragraphs[0]
     p.alignment = align
     run = p.add_run()
-    run.text = text
+    # kpi_native slides are skipped by apply_kpi_emphasis (render_kpi styles
+    # numbers itself), so these texts never feed the ** emphasis path — safe to
+    # strip both markdown and control chars.
+    run.text = sanitize_text(text)
     # SemiBold через face, Bold-флаг не используем
     if font_name is None:
         run.font.name = FONT_SEMIBOLD if bold else FONT
@@ -238,7 +243,10 @@ def set_slide_title(slide, text, dark=False):
     tf = title_ph.text_frame
     tf.clear()
     run = tf.paragraphs[0].add_run()
-    run.text = text.upper()
+    # Generic title setter (chart/table/flow). Titles never carry intentional
+    # ** emphasis and are not on the kpi_emphasis path, so strip both markdown
+    # and control chars (fixes _X000B_ / ** leak in native-slide titles).
+    run.text = sanitize_text(text).upper()
     run.font.name = FONT_SEMIBOLD
     run.font.size = Pt(20)
     run.font.bold = False

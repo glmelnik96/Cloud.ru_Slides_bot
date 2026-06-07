@@ -75,6 +75,8 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 from lxml import etree
 
+from text_sanitize import sanitize_text
+
 
 EMU = 9525
 SLIDE_W_PX = 1280
@@ -283,7 +285,9 @@ def _set_cell_text(cell, text, size_pt=12, bold=False, color_rgb=None):
         if is_bullet:
             _apply_bullet_to_paragraph_table(p)
         run = p.add_run()
-        run.text = clean_line
+        # Table cells live in a graphicFrame, which apply_kpi_emphasis does NOT
+        # visit (no .has_text_frame) — so ** here is a pure leak; strip it.
+        run.text = sanitize_text(clean_line)
         run.font.size = Pt(size_pt)
         _set_weight(run.font, bold)
         run.font.color.rgb = color_rgb if color_rgb is not None else GRAPHITE
@@ -457,7 +461,9 @@ def _add_subtitle(slide, text, dark=False):
     p = tf.paragraphs[0]
     p.alignment = PP_ALIGN.LEFT
     run = p.add_run()
-    run.text = text
+    # Textbox on a table_native slide — apply_kpi_emphasis still visits it, so
+    # only strip control chars (fixes _X000B_) and leave ** to the emphasis pass.
+    run.text = sanitize_text(text, strip_markdown=False)
     run.font.name = FONT
     run.font.size = Pt(11)
     run.font.bold = False
@@ -498,7 +504,8 @@ def _ba_text(slide, x, y, w, h, text, size_pt, bold,
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         p.alignment = align_enum
         run = p.add_run()
-        run.text = line
+        # Textbox on a table_native slide — leave ** to apply_kpi_emphasis.
+        run.text = sanitize_text(line, strip_markdown=False)
         run.font.size = Pt(size_pt)
         _set_weight(run.font, bold)
         run.font.color.rgb = color_rgb
@@ -523,7 +530,8 @@ def _ba_multitext(slide, x, y, w, h, parts, align="left", anchor="middle"):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         p.alignment = align_enum
         run = p.add_run()
-        run.text = str(text)
+        # Textbox on a table_native slide — leave ** to apply_kpi_emphasis.
+        run.text = sanitize_text(str(text), strip_markdown=False)
         run.font.size = Pt(size_pt)
         _set_weight(run.font, bold)
         run.font.color.rgb = color_rgb

@@ -90,6 +90,8 @@ from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
 from pptx.oxml.ns import qn
 from lxml import etree
 
+from text_sanitize import sanitize_text
+
 try:
     import textfit as _textfit
     import font_resolver as _font_resolver
@@ -359,6 +361,8 @@ def add_block(slide, x, y, w, h, lines,
         is_bullet, clean_line = _detect_bullet(line)
         if is_bullet:
             _apply_bullet_to_paragraph(p)
+        # Native flow labels — leak-only (renderer config, no intentional **).
+        clean_line = sanitize_text(clean_line)
         run = p.add_run()
         run.text = clean_line.upper() if (caps_first and i == 0) else clean_line
         run.font.size = Pt(font_sizes[i] if i < len(font_sizes) else font_sizes[-1])
@@ -397,6 +401,8 @@ def add_label(slide, x, y, w, h, text,
         is_bullet, clean_line = _detect_bullet(line)
         if is_bullet:
             _apply_bullet_to_paragraph(p)
+        # Native flow labels — leak-only (renderer config, no intentional **).
+        clean_line = sanitize_text(clean_line)
         run = p.add_run()
         run.text = clean_line.upper() if caps else clean_line
         run.font.size = Pt(font_size)
@@ -1142,7 +1148,7 @@ def render_hero_statement(slide, cfg, dark=False):
     p = tf.paragraphs[0]
     p.alignment = PP_ALIGN.LEFT
     run = p.add_run()
-    run.text = statement.upper()
+    run.text = sanitize_text(str(statement)).upper()
     run.font.size = Pt(fs)
     _set_weight(run.font, True)
     run.font.color.rgb = GRAPHITE
