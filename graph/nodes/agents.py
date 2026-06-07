@@ -639,13 +639,27 @@ def _recover_dropped_slides(
             represented.add(src)
 
     slides = classification_dump.setdefault("slides", [])
+    # The classifier renumbers the deck IN PLACE after a split (e.g. brief 3 →
+    # deck nums 3 AND 4), so a recovery slide MUST NOT reuse the brief num as its
+    # deck ``num`` — that collides with a split part. Downstream lookups
+    # (``_by_num`` in pipeline.py, ``cls_by_num`` in design_node/assemble_node)
+    # are last-wins keyed by ``num``, so a duplicate silently drops a slide.
+    # Allocate a fresh deck num (max existing + 1) per injection; keep
+    # ``_source_slide = brief num`` so ``_inject_parsed_tables`` still restores
+    # the real grid keyed on the brief slide.
+    next_num = max(
+        (s.get("num") for s in slides if isinstance(s.get("num"), int)),
+        default=0,
+    ) + 1
     recovered: list[int] = []
     for bs in brief_slides:
         num = bs["num"]
         if num in represented:
             continue
+        deck_num = next_num
+        next_num += 1
         rec: dict[str, Any] = {
-            "num": num,
+            "num": deck_num,
             "category": "text",
             "subcategory_hint": "",
             "rationale": "recovered: brief slide dropped by classifier",
@@ -671,7 +685,15 @@ def _recover_dropped_slides(
         represented.add(num)
         recovered.append(num)
 
-    # Keep the deck in brief order so downstream stays stable.
+    # Place recovery slides in correct reading order. ``assemble_node`` drives
+    # the final render order by classification ARRAY position (it iterates
+    # ``classification_slides`` directly), while every cross-artefact lookup is
+    # by ``num``/``_source_slide`` — never array index. So reordering the array
+    # is safe and lets us put each recovery slide (fresh max+1 ``num`` but
+    # ``_source_slide`` = brief num) next to its sibling split parts instead of
+    # dangling at the deck tail. A stable sort by ``(_source_slide or num,
+    # _split_part)`` is a no-op on legitimate in-order LLM output and only moves
+    # appended recovery slides into place.
     slides.sort(key=lambda s: (s.get("_source_slide") or s.get("num") or 0,
                                s.get("_split_part") or ""))
     return recovered
