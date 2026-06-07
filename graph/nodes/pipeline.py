@@ -889,10 +889,32 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
         info = info_by_num.get(num) or {}
         info_type = info.get("infographic_type")
         if info_type and info_type != "none":
+            shapes = info.get("shapes") or []
+            # Task 5 (2026-06-07): cap process/timeline cards to the layout
+            # capacity at the FEED point so the renderer never receives more
+            # cards than the horizontal step row fits (~8). Overflow card
+            # text is merged into the last shown card — no source word is
+            # clipped. Lazy import: infographic_renderer pulls python-pptx,
+            # which is only mounted on the skill-scripts path by skill_bridge.
+            try:
+                skill_bridge.install()
+                from infographic_renderer import cap_process_items  # noqa: WPS433
+                capped = cap_process_items(info_type, shapes)
+                if len(capped) != len(shapes):
+                    logger.warning(
+                        "node.assemble.infographic_capped",
+                        session_id=state.session_id, num=num,
+                        type=info_type,
+                        before=len(shapes), after=len(capped),
+                    )
+                shapes = capped
+            except Exception as e:  # noqa: BLE001 — never fail assemble on cap
+                logger.warning("node.assemble.infographic_cap_failed",
+                               session_id=state.session_id, num=num, error=str(e))
             ps_dump = ps.model_dump()
             ps_dump["infographic"] = {
                 "type": info_type,
-                "shapes": info.get("shapes") or [],
+                "shapes": shapes,
             }
             # Re-validate so the extras roundtrip cleanly through Plan.
             ps = PlanSlide.model_validate(ps_dump)

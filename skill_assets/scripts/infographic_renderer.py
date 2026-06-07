@@ -277,6 +277,116 @@ _SAFE_AREA_EMU = {
 }
 
 
+# Task 5 (2026-06-07): process/timeline item cap. A `process`/`flow`
+# infographic is a horizontal row of N cards (blocks) with N-1 arrows
+# between them. The cards must fit inside the safe-area width:
+#   block_width = (safe_w_px - (N-1)*gap) / N   with gap = 60 px
+# safe_w = 1250-30 = 1220 px. At N=8 → block_width = (1220-420)/8 = 100 px,
+# still wide enough for a short label at the 10pt floor. At N=9 the block
+# drops to 82 px (and the deck's recovered-body path produced 10-11 cards
+# in the live failure, clipping the bottom cards off-slide). So 8 is the
+# realistic layout capacity. Cards beyond the cap are NOT dropped — their
+# text is merged into the last shown card so no source word is clipped.
+#
+# `flow` shares the same horizontal step layout family as `process`; both
+# are capped. `comparison`/`matrix`/`tree`/`chart_*`/`none` are different
+# layouts and are left untouched.
+_PROCESS_MAX_ITEMS = 8
+# Shape types that act as a "card" (carry a step label) vs. connectors.
+_CARD_SHAPE_TYPES = ("rounded_rect", "rectangle", "circle")
+_CONNECTOR_SHAPE_TYPES = ("arrow", "line")
+_CAPPED_INFOGRAPHIC_TYPES = ("process", "flow")
+
+
+def cap_process_items(
+    infographic_type: str | None,
+    shapes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cap a process/flow infographic's cards to the layout capacity.
+
+    Called at the feed/distribution point (assemble_plan_node) BEFORE the
+    spec reaches the renderer, so the renderer always sees ≤ cap cards.
+
+    A card is a block shape (``rounded_rect``/``rectangle``/``circle``)
+    carrying step text; ``arrow``/``line`` shapes are connectors. When the
+    card count exceeds ``_PROCESS_MAX_ITEMS`` we keep the first
+    ``cap-1`` cards verbatim and merge the text of ALL overflow cards into
+    the ``cap``-th (last shown) card — every word is preserved, nothing is
+    silently clipped. Orphan connectors that would have pointed at dropped
+    cards are removed so no arrows dangle.
+
+    Returns a NEW list when capping occurs; the original list (unchanged)
+    when the type isn't a step layout or the card count is ≤ cap.
+    Card text-merge mutates only the surviving last card's ``text``.
+    """
+    if infographic_type not in _CAPPED_INFOGRAPHIC_TYPES:
+        return shapes
+    if not shapes:
+        return shapes
+
+    # Indices of card shapes, in render order.
+    card_idxs = [
+        i for i, s in enumerate(shapes)
+        if isinstance(s, dict) and s.get("type") in _CARD_SHAPE_TYPES
+    ]
+    if len(card_idxs) <= _PROCESS_MAX_ITEMS:
+        return shapes
+
+    keep_idxs = card_idxs[:_PROCESS_MAX_ITEMS]
+    overflow_idxs = card_idxs[_PROCESS_MAX_ITEMS:]
+    last_keep_idx = keep_idxs[-1]
+
+    # Merge every overflow card's text into the last kept card so no word
+    # is clipped. Join with " · " (the deck already uses mid-dot separators
+    # for compacted steps) and skip empties / duplicates of the carrier.
+    last_card = shapes[last_keep_idx]
+    parts: list[str] = []
+    base = (last_card.get("text") or "").strip()
+    if base:
+        parts.append(base)
+    for oi in overflow_idxs:
+        t = (shapes[oi].get("text") or "").strip()
+        if t and t not in parts:
+            parts.append(t)
+    merged_text = " · ".join(parts)
+
+    overflow_set = set(overflow_idxs)
+    # Connectors are only meaningful between kept cards. The arrow that
+    # would have linked the last kept card to the first dropped card now
+    # points into empty space, so drop any arrow/line that starts at or
+    # beyond the last kept card's left edge (that arrow and every later
+    # one). Earlier arrows sit between two surviving cards and are kept.
+    try:
+        drop_after_emu = int(last_card.get("left_emu", 0) or 0)
+    except (TypeError, ValueError):
+        drop_after_emu = None
+
+    result: list[dict[str, Any]] = []
+    for i, s in enumerate(shapes):
+        if i in overflow_set:
+            continue  # overflow card text already merged
+        if i == last_keep_idx:
+            # Carry the merged text on the surviving last card.
+            new_card = dict(s)
+            new_card["text"] = merged_text
+            result.append(new_card)
+            continue
+        # Prune orphan connectors that would point past the last kept card.
+        if (
+            isinstance(s, dict)
+            and s.get("type") in _CONNECTOR_SHAPE_TYPES
+            and drop_after_emu is not None
+        ):
+            try:
+                left = int(s.get("left_emu", 0) or 0)
+            except (TypeError, ValueError):
+                left = -1
+            if left >= drop_after_emu:
+                continue
+        result.append(s)
+    return result
+
+
 # If horizontal bounding span occupies less than this fraction of the
 # safe-area, treat as undersize (GLM-5.1 hallucination from 2026-06-05
 # run 29e189bb where 3 columns spanned 179 px on a 1220-px safe area —
