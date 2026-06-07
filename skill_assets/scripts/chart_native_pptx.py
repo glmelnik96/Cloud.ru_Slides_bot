@@ -191,8 +191,19 @@ def add_chart_to_slide(slide, chart_config, left, top, width, height, dark=False
 
     cd = CategoryChartData()
     if ctype == XL_CHART_TYPE.PIE:
-        cd.categories = [str(x) for x in chart_config["labels"]]
-        cd.add_series("", chart_config["values"])
+        # Canonical ChartConfig shape (parse_pptx, schemas/slides.py) carries
+        # ``x`` + ``series`` for EVERY chart type. Legacy / LLM-native callers
+        # may still pass ``labels`` + ``values`` — accept those as a fallback.
+        pie_cats = chart_config.get("x")
+        if pie_cats is None:
+            pie_cats = chart_config["labels"]
+        pie_series = chart_config.get("series")
+        if pie_series:
+            pie_values = pie_series[0]["data"]
+        else:
+            pie_values = chart_config["values"]
+        cd.categories = [str(x) for x in pie_cats]
+        cd.add_series("", pie_values)
     elif editorial:
         # Split the single series into N single-value series so each bar
         # carries its own colour (native charts have no per-point bar fill).

@@ -141,8 +141,8 @@ def test_build_emits_native_editable_charts(parsed, tmp_path) -> None:
     editable native chart shapes (shape.has_chart) — not flattened images —
     with matching type, series and categories.
 
-    Pie is excluded here and covered by ``test_pie_chart_build_is_broken``
-    because the renderer's pie branch reads non-schema keys (see that test).
+    Pie is covered separately by
+    ``test_pie_chart_build_emits_native_editable_pie``.
     """
     nums = (1, 3)  # bar, line
     prs, by_num = _build_charts(parsed, tmp_path, nums)
@@ -180,19 +180,40 @@ def test_build_emits_native_editable_charts(parsed, tmp_path) -> None:
             f"slide {num}: title {src['title']!r} not found in {slide_texts}")
 
 
-def test_pie_chart_build_is_broken(parsed, tmp_path) -> None:
-    """BUG (regression guard): a PARSED pie chart cannot be built end-to-end.
+def test_pie_chart_build_emits_native_editable_pie(parsed, tmp_path) -> None:
+    """A PARSED pie chart builds end-to-end as a REAL editable native pie.
 
     ``parse_pptx._extract_chart`` emits the canonical ChartConfig shape
     (``x`` + ``series``) for every chart type, and ``_inject_parsed_charts``
-    explicitly routes pies to ``chart_pptx_native``. But the renderer's pie
-    branch (``chart_native_pptx.add_chart_to_slide``) reads the non-schema keys
-    ``labels`` / ``values`` instead of ``x`` / ``series`` — so the build raises
-    ``KeyError: 'labels'``.
-
-    This test pins the CURRENT broken behaviour. When the renderer is fixed to
-    read ``x``/``series`` (or inject is taught to translate), flip this to a
-    positive assertion that the pie builds as a native editable chart.
+    routes pies to ``chart_pptx_native``. The renderer's pie branch now reads
+    that canonical ``x``/``series`` shape (with a ``labels``/``values``
+    fallback for legacy callers), so the full chain yields an editable pie —
+    no ``KeyError``.
     """
-    with pytest.raises(KeyError, match="labels"):
-        _build_charts(parsed, tmp_path, (2,))
+    nums = (2,)  # pie
+    prs, by_num = _build_charts(parsed, tmp_path, nums)
+    assert len(prs.slides) == 1
+
+    slide = prs.slides[0]
+    chart_shapes = [sh for sh in slide.shapes if sh.has_chart]
+    assert len(chart_shapes) == 1, (
+        "expected exactly 1 NATIVE pie chart shape (editable, not a flattened "
+        f"image), got {len(chart_shapes)}")
+    chart = chart_shapes[0].chart
+    assert chart.chart_type in (XL_CHART_TYPE.PIE, XL_CHART_TYPE.DOUGHNUT), (
+        f"pie chart_type {chart.chart_type}")
+
+    src = by_num[2]["charts"][0]
+    out_series = list(chart.series)
+    assert len(out_series) == 1, f"pie series count {len(out_series)}"
+    # Values come from the FIRST canonical series; categories from ``x``.
+    assert list(out_series[0].values) == src["series"][0]["data"], (
+        "pie values must match the first canonical series")
+    cats = list(chart.plots[0].categories)
+    assert cats == _EXPECTED[2]["x"], f"pie categories {cats}"
+
+    # Extracted title survived to a visible slide text (template upper-cases it).
+    slide_texts = [sh.text_frame.text.strip().lower() for sh in slide.shapes
+                   if sh.has_text_frame and sh.text_frame.text.strip()]
+    assert src["title"].lower() in slide_texts, (
+        f"pie title {src['title']!r} not found in {slide_texts}")
