@@ -588,9 +588,10 @@ def _recover_dropped_body_lines(
         SUPERSET that extends the title/heading with extra words). Direction (b)
         catches title-VARIANT superset leaks the candidate-denominator check
         misses — deck3 s12, where the body bullet "ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО
-        ЗАПУСКА ПРОДУКТОВ, ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ" (~9 sig words) is
-        a superset of the ~4-word title: |title ∩ cand|/|cand| ≈ 0.44 < 0.6 (a)
-        misses it, but |cand ∩ title|/|title| = 1.0 ≥ 0.6 (b) suppresses it.
+        ЗАПУСКА ПРОДУКТОВ, ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ" (~8 sig words —
+        "ИИ" drops below _MIN_SIG_WORD_LEN) is a superset of the 4-word title:
+        |title ∩ cand|/|cand| = 0.5 < 0.6 (a) misses it, but
+        |cand ∩ title|/|title| = 1.0 ≥ 0.6 (b) suppresses it.
         The slide already renders that content in a non-body placeholder, so
         re-appending it as a trailing body bullet merely overflows the last
         column (deck3 slides 9/12: section headings living in subN slots + a
@@ -666,7 +667,7 @@ def _recover_dropped_body_lines(
         # — a non-body line is a SUBSET of the candidate (candidate is a SUPERSET
         # that extends the title/heading with extra words). Direction (b) catches
         # title-VARIANT superset leaks (deck3 s12: body bullet "<title> ПРОДУКТОВ,
-        # ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ" — |title ∩ cand|/|cand| ≈ 0.44 misses
+        # ИСПОЛЬЗУЮЩИХ ТЕХНОЛОГИИ ИИ-АГЕНТОВ" — |title ∩ cand|/|cand| = 0.5 misses
         # it, but |cand ∩ title|/|title| = 1.0 suppresses it).
         if _max_line_overlap(bwords, non_body_line_words) >= _COVERAGE_THRESHOLD:
             continue
