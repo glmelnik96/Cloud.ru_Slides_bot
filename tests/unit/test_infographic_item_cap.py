@@ -1,6 +1,6 @@
-"""Task 5: process/timeline infographic item cap.
+"""Task 5: process/flow infographic item cap.
 
-Root cause (live): recovered body lines (11) became 10 process/timeline
+Root cause (live): recovered body lines (11) became 10 process/flow
 cards, but the horizontal step layout only fits ~8 cards inside the
 safe-area — the bottom/right cards clipped off the slide because there
 was no item cap.
@@ -126,3 +126,54 @@ def test_cap_flow_type_also_capped() -> None:
     shapes = _interleaved(_PROCESS_MAX_ITEMS + 2)
     capped = cap_process_items("flow", shapes)
     assert len(_card_texts(capped)) == _PROCESS_MAX_ITEMS
+
+
+def test_last_kept_card_missing_left_emu_keeps_all_connectors() -> None:
+    """Issue #2: if the last KEPT card has no positional info (missing
+    ``left_emu``), we have no anchor to decide which connectors dangle, so
+    NO connector is pruned — better to keep an arrow than treat an absent
+    position as 0 (which would prune every arrow, since left >= 0)."""
+    n = _PROCESS_MAX_ITEMS + 3
+    shapes = _interleaved(n)
+    # Drop the positional key from the card that will become the last kept
+    # card (index 7 among cards; in interleaved order that is shape 14).
+    card_positions = [
+        i for i, s in enumerate(shapes)
+        if s.get("type") in ("rounded_rect", "rectangle", "circle")
+    ]
+    last_keep_shape_idx = card_positions[_PROCESS_MAX_ITEMS - 1]
+    del shapes[last_keep_shape_idx]["left_emu"]
+
+    arrows_before = sum(1 for s in shapes if s.get("type") == "arrow")
+    capped = cap_process_items("process", shapes)
+    arrows_after = sum(1 for s in capped if s.get("type") == "arrow")
+
+    # Cards are still capped + merged exactly as before.
+    assert len(_card_texts(capped)) == _PROCESS_MAX_ITEMS
+    # With no positional anchor, NO connector is pruned: every arrow in the
+    # input survives (overflow CARDS are still merged/removed, but the
+    # cap_process_items prune step is disabled). Under the old `or 0` bug
+    # this would have pruned every arrow (left >= 0) down to 0.
+    assert arrows_after == arrows_before
+    assert arrows_after > 0  # would be 0 under the old `or 0` bug
+
+
+def test_positioned_last_card_still_prunes_orphan_connectors() -> None:
+    """Companion to the missing-position case: a normal numeric
+    ``left_emu`` on the last kept card still prunes connectors at/after its
+    left edge (the orphan arrows that would dangle into dropped cards)."""
+    n = _PROCESS_MAX_ITEMS + 3
+    shapes = _interleaved(n)
+
+    capped = cap_process_items("process", shapes)
+
+    arrows = [s for s in capped if s.get("type") == "arrow"]
+    # Only arrows that sit before the last kept card's left edge survive.
+    last_card = next(
+        s for s in capped
+        if s.get("type") in ("rounded_rect", "rectangle", "circle")
+        and " · " in (s.get("text") or "")
+    )
+    drop_after = last_card["left_emu"]
+    assert all(a["left_emu"] < drop_after for a in arrows)
+    assert len(arrows) == _PROCESS_MAX_ITEMS - 1

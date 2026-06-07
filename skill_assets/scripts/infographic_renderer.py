@@ -277,7 +277,7 @@ _SAFE_AREA_EMU = {
 }
 
 
-# Task 5 (2026-06-07): process/timeline item cap. A `process`/`flow`
+# Task 5 (2026-06-07): process/flow item cap. A `process`/`flow`
 # infographic is a horizontal row of N cards (blocks) with N-1 arrows
 # between them. The cards must fit inside the safe-area width:
 #   block_width = (safe_w_px - (N-1)*gap) / N   with gap = 60 px
@@ -293,6 +293,8 @@ _SAFE_AREA_EMU = {
 # layouts and are left untouched.
 _PROCESS_MAX_ITEMS = 8
 # Shape types that act as a "card" (carry a step label) vs. connectors.
+# Scope boundary: standalone ``type:"text"`` shapes are NOT counted as
+# cards, so a label-only step does not consume cap budget.
 _CARD_SHAPE_TYPES = ("rounded_rect", "rectangle", "circle")
 _CONNECTOR_SHAPE_TYPES = ("arrow", "line")
 _CAPPED_INFOGRAPHIC_TYPES = ("process", "flow")
@@ -356,10 +358,20 @@ def cap_process_items(
     # points into empty space, so drop any arrow/line that starts at or
     # beyond the last kept card's left edge (that arrow and every later
     # one). Earlier arrows sit between two surviving cards and are kept.
-    try:
-        drop_after_emu = int(last_card.get("left_emu", 0) or 0)
-    except (TypeError, ValueError):
+    # NOTE: this assumes shapes are emitted monotonically left-to-right,
+    # which is the Agent 06 process/flow pattern (cards laid out in a row).
+    # A MISSING or non-numeric ``left_emu`` on the last kept card means we
+    # have no positional anchor — leave ``drop_after_emu=None`` so NO
+    # connector is pruned (better to keep an arrow than prune them all by
+    # treating an absent position as 0).
+    raw_left = last_card.get("left_emu")
+    if raw_left is None:
         drop_after_emu = None
+    else:
+        try:
+            drop_after_emu = int(raw_left)
+        except (TypeError, ValueError):
+            drop_after_emu = None
 
     result: list[dict[str, Any]] = []
     for i, s in enumerate(shapes):
