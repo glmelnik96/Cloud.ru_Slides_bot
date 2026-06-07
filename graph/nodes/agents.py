@@ -502,6 +502,31 @@ def _card_from_body_item(raw: str) -> dict[str, str] | None:
     return {"title": title, "text": body}
 
 
+def _looks_like_card_grid(cards: list[dict[str, str]]) -> bool:
+    """Shared "is this body a card grid, not prose?" heuristic.
+
+    Used at BOTH card-promotion sites (``_diversify_text_slides`` and the
+    recovery path in ``_recover_dropped_slides``) so they agree on what counts
+    as card-shaped. The full heuristic is:
+
+      * 3-8 non-empty card items (``_F_MIN_CARDS``-``_F_MAX_CARDS``), AND
+      * no single card body over ``_F_CARD_BODY_MAX`` (one over-long blob is a
+        hard veto — it's the CVE/Памятка prose pattern that clips a card), AND
+      * a majority are "card-shaped": a separator body within the cap OR a
+        short title-only item (``_F_PARALLEL_LEN``) — else it reads as prose.
+    """
+    if not (_F_MIN_CARDS <= len(cards) <= _F_MAX_CARDS):
+        return False
+    if any(len(c["text"]) > _F_CARD_BODY_MAX for c in cards):
+        return False
+    parallel = sum(
+        1 for c in cards
+        if (c["text"] and len(c["text"]) <= _F_CARD_BODY_MAX)
+        or len(c["title"]) <= _F_PARALLEL_LEN
+    )
+    return parallel >= max(_F_MIN_CARDS, (len(cards) * 3 + 4) // 5)
+
+
 def _diversify_text_slides(
     classification_dump: dict[str, Any],
     brief: dict[str, Any],
@@ -544,22 +569,12 @@ def _diversify_text_slides(
         if len(raw_items) < _F_MIN_CARDS:
             continue
         cards = [c for c in (_card_from_body_item(r) for r in raw_items) if c]
-        if not (_F_MIN_CARDS <= len(cards) <= _F_MAX_CARDS):
-            continue
-        # #2: a single over-long body (e.g. a 400-char CVE/Памятка blob) is a
-        # hard signal the content is prose, not parallel captions — forcing it
-        # into a card clips past the box. Decline so the slide stays a normal
-        # text slide where ALL content survives (no truncation at classify time).
-        if any(len(c["text"]) > _F_CARD_BODY_MAX for c in cards):
-            continue
-        # Majority must be card-shaped (separator within the body cap OR a short
-        # title-only item) — else it's prose.
-        parallel = sum(
-            1 for c in cards
-            if (c["text"] and len(c["text"]) <= _F_CARD_BODY_MAX)
-            or len(c["title"]) <= _F_PARALLEL_LEN
-        )
-        if parallel < max(_F_MIN_CARDS, (len(cards) * 3 + 4) // 5):
+        # #2: count range + per-card body cap (one over-long blob is a hard
+        # veto: the CVE/Памятка prose pattern clips a card) + majority must be
+        # card-shaped (separator within the cap OR a short title-only item) —
+        # else it's prose and stays a normal text slide where ALL content
+        # survives. See ``_looks_like_card_grid`` (shared with the recovery path).
+        if not _looks_like_card_grid(cards):
             continue
         header = (bs.get("raw_title") or "").strip()
         _set_card_grid(s, header, cards)
@@ -675,9 +690,7 @@ def _recover_dropped_slides(
             rec["table"] = _table_from_brief_slide(bs)
         else:
             cards = [c for c in (_card_from_body_item(r) for r in raw_items) if c]
-            if _F_MIN_CARDS <= len(cards) <= _F_MAX_CARDS and not any(
-                len(c["text"]) > _F_CARD_BODY_MAX for c in cards
-            ):
+            if _looks_like_card_grid(cards):
                 _set_card_grid(rec, (bs.get("raw_title") or "").strip(), cards)
             elif len(raw_items) > 1:
                 rec["category"] = "multicolumn"
@@ -799,11 +812,12 @@ def classify_node(state: SessionState) -> dict[str, Any]:
         classification_dump, arts.get("parsed_deck") or {})
     diversified = _diversify_text_slides(classification_dump, brief)
     arts["classification"] = classification_dump
-    for num in recovered_slides:
+    if recovered_slides:
         logger.warning(
-            "node.classify.slide_recovered",
+            "node.classify.slides_recovered",
             session_id=state.session_id,
-            source_slide=num,
+            count=len(recovered_slides),
+            nums=recovered_slides,
         )
     if injected_tables:
         logger.info(
