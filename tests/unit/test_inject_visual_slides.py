@@ -8,6 +8,39 @@ def _cls(slides):
     return {"slides": slides}
 
 
+def test_hybrid_text_image_classifies_then_routes_to_image_native():
+    """End-to-end: a hybrid (title+body+dominant image) slide is recovered.
+
+    classify_visual_kind -> "raster", then _inject_visual_slides forces an
+    image_native carrying the extracted image_path and the parsed title.
+    The body is intentionally not folded into a caption (image recovery only).
+    """
+    from worker import skill_bridge
+    skill_bridge.install()
+    from visual_kind import classify_visual_kind  # noqa: E402
+
+    EMU = 9525
+    hybrid = {
+        "num": 4, "title": "Скриншот дашборда",
+        "body": ["подпись один", "подпись два"], "group_nodes": [],
+        # ~50% of a default 16:9 slide → dominant.
+        "images": [{"width_emu": 640 * EMU, "height_emu": 480 * EMU}],
+    }
+    vk = classify_visual_kind(hybrid)
+    assert vk == "raster"
+
+    hybrid["visual_kind"] = vk
+    hybrid["image_path"] = "/tmp/x/slide4_img1.png"
+    cls = _cls([{"num": 4, "slide_type": None, "image": None,
+                 "kpi": None, "chart": None, "table": None, "flow": None}])
+    counts = _inject_visual_slides(cls, {"slides": [hybrid]})
+    assert counts["image"] == 1
+    s = cls["slides"][0]
+    assert s["slide_type"] == "image_native"
+    assert s["image"]["image_path"] == "/tmp/x/slide4_img1.png"
+    assert s["image"]["title"] == "Скриншот дашборда"
+
+
 def test_raster_forces_image_native_with_path():
     parsed = {"slides": [
         {"num": 3, "visual_kind": "raster", "title": "Архитектура",

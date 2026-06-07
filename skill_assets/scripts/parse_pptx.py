@@ -150,6 +150,9 @@ def parse(input_path):
             "num": snum,
             "layout_name": slide.slide_layout.name,
             "layout_idx_in_master": layout_to_idx.get(id(slide.slide_layout)),
+            # Carried so classify_visual_kind can measure an image as a fraction
+            # of the actual slide (dominant-raster recovery on hybrid slides).
+            "slide_size": result["slide_size"],
             "title": None,
             "body": [],
             "text_runs": [],
