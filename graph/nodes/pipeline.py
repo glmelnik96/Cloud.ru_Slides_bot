@@ -388,13 +388,19 @@ def _native_block_is_usable(slide_type: str, cls: dict[str, Any]) -> bool:
         nums = kpi.get("numbers") or []
         if not nums:
             return False
-        # Belt-and-braces: kpi_renderer.render_kpi() hard-caps at 3 numbers
-        # and raises ValueError otherwise — taking down the whole pipeline.
-        # classify_node._coerce_overflow_kpis is the primary truncation
-        # site; this mutation here catches any path that bypasses it
-        # (e.g. autofix loop re-injecting numbers, future agent additions).
-        if len(nums) > 3:
-            kpi["numbers"] = nums[:3]
+        # Belt-and-braces numeric guard: kpi_renderer.render_kpi() supports only
+        # 1-3 numbers and KPI values must be numeric (a bare word like "Прогноз"
+        # renders as a giant non-number). classify_node._coerce_overflow_kpis is
+        # the primary validation/demotion site; this catches any path that
+        # bypasses it (autofix re-injection, future agents). We drop non-numeric
+        # values and reject the slide if none remain or >3 survive — assemble
+        # then skips it rather than crashing the pipeline.
+        valid = [n for n in nums
+                 if any(ch.isdigit() for ch in str((n or {}).get("value", "")))]
+        if not valid or len(valid) > 3:
+            return False
+        if valid != nums:
+            kpi["numbers"] = valid
             cls["kpi"] = kpi
         return True
     if slide_type == "flow_diagram_native":

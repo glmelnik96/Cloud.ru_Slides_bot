@@ -128,21 +128,36 @@ def _coerce_thin_tables(classification_dump: dict[str, Any]) -> int:
     return coerced
 
 
+def _kpi_value_has_digit(value: Any) -> bool:
+    """True iff a KPI ``value`` carries at least one decimal digit.
+
+    The classifier delegates KPI pairing entirely to the LLM, which has no
+    deterministic algorithm and once put a bare word ("Прогноз") into a KPI
+    ``value`` — rendered as a giant non-number. A real metric always has a
+    digit; units/symbols/spaces ("1 200 руб", "15%", "+3,5 п.п.") don't change
+    that. ``str.isdigit`` covers unicode decimal digits too.
+    """
+    return any(ch.isdigit() for ch in str(value))
+
+
 def _coerce_overflow_kpis(classification_dump: dict[str, Any]) -> int:
-    """Clamp ``kpi_native`` slides to the renderer's hard 1-3 numbers limit.
+    """Validate ``kpi_native`` numbers and demote slides the renderer rejects.
 
-    ``skill_assets/scripts/kpi_renderer.py::render_kpi`` raises
-    ``ValueError("KPI supports 1-3 numbers, got N")`` for n==0 or n>3.
-    Classifier prompt asks for "3 ключевых KPI" but the LLM occasionally
-    produces 4-6 (it concatenates every number in the brief) or 0
-    (mis-classifies a non-stats slide as ``kpi_native``).
+    ``skill_assets/scripts/kpi_renderer.py::render_kpi`` only supports 1-3
+    numbers, and KPI pairing is fully delegated to the LLM (no deterministic
+    algorithm, no numeric check) — so values like "Прогноз" leak through and a
+    blind ``nums[:3]`` silently drops money sums.
 
-    Policy:
-      • n > 3 → truncate to first 3. Preserves the KPI layout, which is
-        the strongest visual element on a stats slide; the LLM puts the
-        most salient numbers first, so the tail is the safer cut.
-      • n == 0 → demote to ``multicolumn``. A KPI slide with no numbers
-        is broken; multicolumn is a safe text-only fallback.
+    Deterministic guard (in the repo's coerce/post-pass spirit):
+      1. Drop every number whose ``value`` has NO digit (``_kpi_value_has_digit``)
+         — garbage like "Прогноз" never reaches the renderer.
+      2. 0 valid left → DEMOTE off ``kpi_native`` to ``multicolumn``. A KPI
+         slide with no numbers is broken; the body survives via the brief on the
+         donor/text route (fixes the "Прогноз" giant-word slide).
+      3. >3 valid → DEMOTE to a ``card_grid`` flow native, one card per
+         number+label pair. This PRESERVES ALL pairs (no silent ``nums[:3]``
+         money-sum loss); the card grid renders any count cleanly.
+      4. 1-3 valid → keep ``kpi_native`` with the filtered numbers.
 
     Mutates in place. Returns the count of slides touched.
     """
@@ -152,15 +167,40 @@ def _coerce_overflow_kpis(classification_dump: dict[str, Any]) -> int:
             continue
         kpi = s.get("kpi") or {}
         nums = kpi.get("numbers") or []
-        if 1 <= len(nums) <= 3:
-            continue
-        if len(nums) > 3:
-            kpi["numbers"] = nums[:3]
-            s["kpi"] = kpi
-        else:  # len(nums) == 0
+        valid = [n for n in nums if _kpi_value_has_digit((n or {}).get("value"))]
+        if len(valid) == len(nums) and 1 <= len(valid) <= 3:
+            continue  # all numeric and within the renderer's limit — leave it
+        if not valid:
+            # 0 valid → demote to a safe text fallback; body recovered from brief.
             s["slide_type"] = None
             s["kpi"] = None
             s["category"] = "multicolumn"
+        elif len(valid) > 3:
+            # >3 valid → demote to card_grid, preserving EVERY number+label pair.
+            cards = [
+                {
+                    "title": str((n or {}).get("value", "")).strip(),
+                    "text": str((n or {}).get("desc", "")).strip(),
+                }
+                for n in valid
+            ]
+            ncards = len(cards)
+            cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
+            s["slide_type"] = "flow_diagram_native"
+            s["category"] = "other"
+            s["flow"] = {
+                "header": (kpi.get("title") or "").strip(),
+                "subtitle": "", "preset": "card_grid",
+                "cards": cards, "columns": [], "rows": [],
+                "statement": "", "support": "", "grid": False, "cols": cols,
+                "blocks": [], "arrows": [],
+            }
+            for k in ("kpi", "chart", "table", "image"):
+                s[k] = None
+        else:
+            # 1-3 valid after dropping non-numeric — keep kpi_native, filtered.
+            kpi["numbers"] = valid
+            s["kpi"] = kpi
         coerced += 1
     return coerced
 

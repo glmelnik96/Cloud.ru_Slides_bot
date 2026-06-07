@@ -51,6 +51,8 @@ SYSTEM = f"""\
 - team С ФОТО (есть фотографии людей) → team (subcategory_hint: "team_3"/"team_4"/"team_5"/"team_10"). БЕЗ фото (только имя+роль/должность, текст) → flow_diagram_native + flow.preset="card_grid", flow.cards=[{{title=имя, text=роль}}], category=other. Причина: donor-team (49/50/51/71) — фото-макеты, их текстовые слоты НЕ замаплены; команда без фото туда уходит пустой (рамки без подписей + утечка mock-текста, live deck_b.slide5). card_grid рендерит имя+роль чисто.
 - data (1 KPI) → callout
 - data (2–3 KPI) → multicolumn + slide_type=kpi_native
+- ПАРЫ KPI: каждое число kpi → ровно ОДНА пара {{value (само число с единицей: "84", "1 200 руб", "15%"), desc (короткая подпись)}}. value ОБЯЗАН содержать цифру — не клади туда слова-прогнозы/заголовки ("Прогноз", "Итого") как число.
+- >3 KPI ИЛИ денежные суммы (несколько сумм/строк бюджета) → используй table_native/card_grid (flow_diagram_native, preset="card_grid", по карточке на пару число+подпись), НЕ kpi_native — kpi_native рендерит максимум 3 числа и молча теряет остальные суммы.
 - image (>50% фото) → image (subcategory_hint: "photo_full"/"photo_half"/"illustration_half")
 - image (UI/скриншот) → image (subcategory_hint: "screenshot_bg_1"/"_2"/"_3"), проставь image.frame="browser" (рендер добавит бренд-хром: зелёная title-плашка + рамка окна, эталон slide 73). Обычное фото/иллюстрация → frame=null.
 - schema → flow_diagram_native (slide_type) + category=other
@@ -58,7 +60,7 @@ SYSTEM = f"""\
 - table → table_native + category=table
 
 ПРАВИЛО ВЫБОРА NATIVE RENDER (триггеры):
-- 1–3 KPI чисел → slide_type=kpi_native, заполни kpi{{}}
+- 1–3 KPI чисел (каждое value с цифрой) → slide_type=kpi_native, заполни kpi{{}}. 0 чисел или >3 → НЕ kpi_native (см. правило о парах/денежных суммах выше).
 - Серии данных с осью → chart_pptx_native (НЕ chart_native — chart должен быть редактируемым)
 - chart.style="editorial" ТОЛЬКО для ОДНОСЕРИЙНОГО bar-чарта-«героя» роста/импакта (одна метрика по годам/категориям, есть пиковое значение): рендерится на тёмном слайде с градиентом зелёных столбцов и крупной белой выноской → поставь dark=true. accent_idx = индекс пикового/ключевого столбца. Многосерийные и не-bar чарты → style=null (чистый светлый чарт).
 - Регулярная таблица ≥3×3 без объединённых ячеек → table_native (style="zebra", first_col_wider=true по умолчанию)
