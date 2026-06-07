@@ -511,6 +511,69 @@ _COVERAGE_THRESHOLD = 0.6
 _DUPLICATE_THRESHOLD = 0.6
 
 
+# ─── cover title/subtitle swap-guard ─────────────────────────────────────────
+# Russian month names (genitive form, as written on slides: "9 Июня 2026").
+_DATE_MONTHS_RE = re.compile(
+    r"\b(январ|феврал|март|апрел|мая|май|июн|июл|август|сентябр|октябр|"
+    r"ноябр|декабр)\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+# A bare 4-digit year in the plausible deck range.
+_DATE_YEAR_RE = re.compile(r"\b20(2[0-9]|3[0-5])\b")
+# dd.mm.yyyy / dd/mm/yyyy / dd-mm-yyyy numeric date.
+_DATE_NUMERIC_RE = re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b")
+# Event markers that, combined with a date signal, mark an event/venue line.
+_EVENT_MARKER_RE = re.compile(
+    r"(\bдень\b|\bday\b|конференц|форум|митап|саммит|вебинар|"
+    r"tech\s*day|go\s*cloud)",
+    re.IGNORECASE | re.UNICODE,
+)
+# Product/title words: their presence vetoes the date/event classification —
+# a line naming the product is a title, not a date line, even if it carries a
+# trailing year.
+_PRODUCT_WORD_RE = re.compile(
+    r"(платформ|возможност|решени|сервис|продукт|облак|cloud\.ru|advanced)",
+    re.IGNORECASE | re.UNICODE,
+)
+# Conservative length cap — a real product title can be long; a date/event
+# line is short. Beyond this we never classify as date/event.
+_DATE_EVENT_MAX_LEN = 60
+
+
+def _looks_like_date_or_event(text: str) -> bool:
+    """Conservative test: does ``text`` look like a date/event/venue line that
+    must NOT win the cover slide's title slot?
+
+    Designed to MISS rather than over-fire (a wrong swap is worse than a
+    missed one). A line qualifies only when it is short AND carries no obvious
+    product/title word AND shows a strong date/event signal:
+      • a Russian month name or a plausible 4-digit year (2020–2035), or
+      • a numeric dd.mm.yyyy-style date, or
+      • an event marker ("День"/"Day"/"конференция"/"Tech Day"/…) — and a
+        bare event marker only counts together with a "·" name·date join or a
+        date token, so a generic word like "День" alone can't trip it.
+    """
+    if not text:
+        return False
+    s = text.strip()
+    if not s or len(s) > _DATE_EVENT_MAX_LEN:
+        return False
+    if _PRODUCT_WORD_RE.search(s):
+        return False
+    has_month = bool(_DATE_MONTHS_RE.search(s))
+    has_year = bool(_DATE_YEAR_RE.search(s))
+    has_numeric = bool(_DATE_NUMERIC_RE.search(s))
+    has_event = bool(_EVENT_MARKER_RE.search(s))
+    has_date = has_month or has_year or has_numeric
+    if has_date:
+        return True
+    # Event marker without a date token only counts when it's a "name · date"
+    # style join (the "·"/"|" separator), e.g. "Cloud Tech Day · …".
+    if has_event and ("·" in s or "•" in s or "|" in s):
+        return True
+    return False
+
+
 def _body_lines(text: str) -> list[str]:
     """Split a body string into non-empty logical lines (\n or \v separated)."""
     if not text:
@@ -843,6 +906,38 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                             session_id=state.session_id,
                             num=num, donor=int(donor),
                             source="brief.raw_title" if num in brief_slides_by_num else "brief.topic",
+                        )
+
+                # Cover swap-guard (2026-06-07): on the COVER/title slide,
+                # parse_pptx assigns the FIRST short text run as the title, so
+                # a source cover that lists the event/date line BEFORE the real
+                # product title ("Cloud Tech Day · 9 Июня 2026" then "Cloud.ru
+                # Advanced: …") demotes the product name to the subtitle. Runs
+                # AFTER the title slot is populated (so it sees the Distributor's
+                # assignment) and AFTER the empty-title D3 fallback, so the two
+                # don't conflict. Conservative: only swaps when the title looks
+                # like a date/event line, the subtitle does NOT, and the
+                # subtitle is a plausible (longer) title.
+                if (
+                    num == 1
+                    and "title" in donor_slot_names
+                    and "subtitle" in donor_slot_names
+                ):
+                    title_txt = (slots.get("title") or "").strip()
+                    sub_txt = (slots.get("subtitle") or "").strip()
+                    if (
+                        title_txt
+                        and sub_txt
+                        and _looks_like_date_or_event(title_txt)
+                        and not _looks_like_date_or_event(sub_txt)
+                        and len(sub_txt) >= len(title_txt)
+                    ):
+                        slots["title"], slots["subtitle"] = sub_txt, title_txt
+                        logger.info(
+                            "node.assemble.title_subtitle_swap",
+                            session_id=state.session_id,
+                            num=num, donor=int(donor),
+                            old_title=title_txt, new_title=sub_txt,
                         )
 
                 # #5 fix (2026-06-07): recover brief body lines the Distributor
