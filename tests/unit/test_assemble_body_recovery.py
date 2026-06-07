@@ -44,6 +44,7 @@ def _artefacts(
     donor: int = 21,
     brief_num: int | None = None,
     cls_extra: dict[str, Any] | None = None,
+    title_content: str = "OBS: Custom SSL",
 ) -> dict[str, Any]:
     """Single-slide donor bundle. Donor 21 = title(shape_idx 0) +
     body(shape_idx 1) — a single body slot (see donor-slot-map.yaml).
@@ -72,7 +73,7 @@ def _artefacts(
             "slides": [{
                 "slide_num": num,
                 "placeholder_assignments": [
-                    {"ph_idx": 0, "content": "OBS: Custom SSL", "ph_type": "TITLE"},
+                    {"ph_idx": 0, "content": title_content, "ph_type": "TITLE"},
                     {"ph_idx": 1, "content": body_content, "ph_type": "BODY"},
                 ],
             }],
@@ -256,3 +257,61 @@ def test_no_foreign_contamination_when_source_slide_absent(monkeypatch) -> None:
     body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
     assert body == "Совершенно другой контент."
     assert "принадлежит слайду 5" not in body
+
+
+# ── Task 4: title-duplicate-in-body filter ─────────────────────────────────
+
+
+def test_recovered_line_equal_to_title_is_dropped(monkeypatch) -> None:
+    """Task 4 (a) — a genuinely-dropped brief line whose NORMALIZED text
+    equals the slide title must NOT be recovered into the body (it would
+    duplicate the title as a trailing bullet).
+
+    Brief has 2 lines: a distinctive one (kept → anchor) and a heading line
+    that equals the title. The distributor dropped the heading line; without
+    the filter, recovery would re-append it under the body → title shown
+    twice. The title-equality filter must drop it.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Уникальная мысль про кластеры регионы\n"
+        "Резервное копирование данных"
+    ]
+    # Distributor kept ONLY the distinctive line (the heading line, which
+    # equals the title, was dropped).
+    body_content = "Уникальная мысль про кластеры регионы."
+    title_content = "Резервное копирование данных"
+    state = _make_state(_artefacts(
+        raw_body=raw_body, body_content=body_content,
+        title_content=title_content,
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    body = slots["body"]
+    # The title-equal line must NOT have been re-appended to the body.
+    assert "Резервное копирование данных" not in body
+    # The kept anchor line is untouched.
+    assert body == "Уникальная мысль про кластеры регионы."
+
+
+def test_distinct_dropped_line_kept_when_title_differs(monkeypatch) -> None:
+    """Task 4 (b) — no false drop: a genuinely-dropped brief line that does
+    NOT equal the title is still recovered. Proves the filter is full-equality
+    against the title, not an over-broad gate that suppresses real content."""
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Уникальная мысль про кластеры регионы\n"
+        "Резервное копирование данных"
+    ]
+    body_content = "Уникальная мысль про кластеры регионы."
+    title_content = "Совсем другой заголовок слайда"
+    state = _make_state(_artefacts(
+        raw_body=raw_body, body_content=body_content,
+        title_content=title_content,
+    ))
+    out = assemble_plan_node(state)
+    body = out["artefacts"]["plan"]["slides"][0]["slots"]["body"]
+    # The dropped line differs from the title → recovered as normal.
+    assert "Резервное копирование данных" in body
+    non_empty = [ln for ln in body.split("\n") if ln.strip()]
+    assert len(non_empty) == 2

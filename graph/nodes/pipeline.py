@@ -600,6 +600,15 @@ def _recover_dropped_body_lines(
         return []
 
     distributed_line_words = [_sig_words(dl) for dl in distributed_lines]
+    # Title-duplicate gate (Task 4): the body recovery / distribution logic can
+    # leave a heading line equal to the slide title in the brief body. Recovering
+    # it would render the title twice (title bar + trailing bullet). Drop any
+    # candidate whose NORMALISED text equals the title, using the SAME
+    # significant-word normalisation the duplicate/coverage gates use (``\\w+``
+    # tokens ≥3 chars, lowercased — strips punctuation/markdown). Equality of the
+    # word sets, not subset, so legitimate body lines that merely overlap the
+    # title are never over-dropped.
+    title_words = _sig_words(str(slots.get("title") or ""))
 
     # Pre-compute per-brief-line coverage so we can apply the wholesale-rephrase
     # anchor gate before deciding what (if anything) to recover.
@@ -618,6 +627,10 @@ def _recover_dropped_body_lines(
         if overlap >= _COVERAGE_THRESHOLD:
             continue  # already represented (kept / lightly reformatted)
         bwords = _sig_words(bl)
+        # Title-duplicate gate (Task 4): drop a candidate whose normalised text
+        # equals the title — re-appending it would duplicate the title in body.
+        if title_words and bwords == title_words:
+            continue
         # Duplicate/subset gate: skip if any distributed line is largely a
         # subset of this candidate — it would re-introduce kept content.
         if any(
