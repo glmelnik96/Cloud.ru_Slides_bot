@@ -583,12 +583,11 @@ def _diversify_text_slides(
 
 
 # A body is "substantial" — worth its own companion slide next to an
-# ``image_native`` — when it carries real prose, not a one-line caption. The
-# sparse detector treats a body slot of <= ``_SPARSE_THIN_WORDS`` (2) words as
-# trivial; a substantial body is several such slots' worth. ``_SPARSE_MIN_BODY_
-# SLOTS`` (3) × ~2× the thin-word floor ≈ 12 words is the floor below which the
-# text reads as a caption the image already implies (OBS/CCE: a couple of short
-# captions stay folded; two real sentences earn a companion).
+# ``image_native`` — when it carries real prose, not a one-line caption.
+# Empirically, bodies below ~12 words read as a caption the image already
+# implies; at or above it the text earns its own slide. 12 is a hand-tuned
+# floor (a couple of short captions stay folded; two real sentences earn a
+# companion), not a value derived from the sparse-detector constants.
 _IMG_COMPANION_MIN_BODY_WORDS = 12
 
 
@@ -965,7 +964,7 @@ def classify_node(state: SessionState) -> dict[str, Any]:
         )
     if image_companions:
         logger.info(
-            "node.classify.image_companion_injected",
+            "node.classify.image_companions_injected",
             session_id=state.session_id,
             count=image_companions,
         )
