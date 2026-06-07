@@ -567,6 +567,116 @@ def _diversify_text_slides(
     return promoted
 
 
+# Brief intents that mean "a table IS the slide's content" (Agent 01 prompt:
+# "schema/chart/table — диаграмма/график/таблица как основное содержимое").
+# A dropped slide with this intent is recovered as a ``table_native``.
+_TABLE_INTENTS = ("table",)
+
+
+def _table_from_brief_slide(bs: dict[str, Any]) -> dict[str, Any]:
+    """Build a valid ``TableConfig`` dict from a text-only brief slide.
+
+    The brief is lossy — it carries no real cell grid, only ``raw_title`` +
+    ``raw_body`` lines. We render each non-empty body line as a single-column
+    row under a one-column header (the title). This is a structurally valid
+    table that preserves every body line; if ``parse_pptx`` actually extracted
+    the grid, ``_inject_parsed_tables`` (which runs AFTER this guard) overwrites
+    this stub with the real cells keyed by ``_source_slide``.
+    """
+    header = (bs.get("raw_title") or "").strip()
+    rows = [[" ".join(str(x).replace("\x0b", " ").split())]
+            for x in (bs.get("raw_body") or []) if str(x).strip()]
+    if not rows:
+        rows = [[""]]
+    return {
+        "header": header,
+        "subtitle": "",
+        "style": "zebra",
+        "headers": [header or "Данные"],
+        "data": rows,
+        "first_col_wider": True,
+    }
+
+
+def _recover_dropped_slides(
+    classification_dump: dict[str, Any],
+    brief: dict[str, Any],
+) -> list[int]:
+    """Guard: every brief slide ``num`` must be represented in classification.
+
+    The LLM classifier can split a brief slide and mis-renumber, silently
+    dropping a whole brief slide's content (live dl1: brief slide 4 DNS table
+    vanished after a 3→(3,4) split). There is no deterministic check that each
+    brief slide is represented — this is that check, in the repo's
+    deterministic-guard-over-LLM-trust spirit (cf. ``strip_residual_markdown``,
+    ``_recover_dropped_body_lines``, the Task-1 KPI guard).
+
+    A classification slide represents the brief slide identified by
+    ``_source_slide or num`` (the established split convention) — so both halves
+    of a 3→(3,4) split credit brief slide 3, leaving brief slide 4 still needing
+    recovery if no slide maps to it.
+
+    For each unrepresented brief slide a recovery slide is INJECTED, built from
+    that brief slide's own content (zero silent loss):
+      * table intent → ``table_native`` (real grid restored later by
+        ``_inject_parsed_tables`` if parsed; else a valid text-row stub),
+      * structured body (>=3 card-shaped items) → ``card_grid`` flow native,
+      * else → a plain donor-route text/multicolumn slide (the distributor
+        fills it from the brief by ``num``/``_source_slide``).
+
+    Runs BEFORE the type-coercion passes so injected slides flow through them.
+    Mutates ``classification_dump`` in place; returns the recovered brief nums.
+    """
+    brief_slides = [bs for bs in (brief.get("slides") or [])
+                    if isinstance(bs.get("num"), int)]
+    if not brief_slides:
+        return []
+
+    represented: set[int] = set()
+    for s in classification_dump.get("slides") or []:
+        src = s.get("_source_slide") or s.get("num")
+        if isinstance(src, int):
+            represented.add(src)
+
+    slides = classification_dump.setdefault("slides", [])
+    recovered: list[int] = []
+    for bs in brief_slides:
+        num = bs["num"]
+        if num in represented:
+            continue
+        rec: dict[str, Any] = {
+            "num": num,
+            "category": "text",
+            "subcategory_hint": "",
+            "rationale": "recovered: brief slide dropped by classifier",
+            "slide_type": None,
+            "kpi": None, "chart": None, "table": None, "flow": None, "image": None,
+            "_source_slide": num,
+        }
+        intent = str(bs.get("intent") or "").strip().lower()
+        raw_items = [str(x) for x in (bs.get("raw_body") or []) if str(x).strip()]
+        if intent in _TABLE_INTENTS:
+            rec["slide_type"] = "table_native"
+            rec["category"] = "table"
+            rec["table"] = _table_from_brief_slide(bs)
+        else:
+            cards = [c for c in (_card_from_body_item(r) for r in raw_items) if c]
+            if _F_MIN_CARDS <= len(cards) <= _F_MAX_CARDS and not any(
+                len(c["text"]) > _F_CARD_BODY_MAX for c in cards
+            ):
+                _set_card_grid(rec, (bs.get("raw_title") or "").strip(), cards)
+            elif len(raw_items) > 1:
+                rec["category"] = "multicolumn"
+        slides.append(rec)
+        represented.add(num)
+        recovered.append(num)
+
+    # Keep the deck in brief order so downstream stays stable.
+    slides.sort(key=lambda s: (s.get("_source_slide") or s.get("num") or 0,
+                               s.get("_split_part") or ""))
+    return recovered
+
+
 # Categories the sparse detector inspects. Everything else (title/divider/
 # image/logo/pattern_bg/team/timeline/callout and all native slide_types)
 # is intentionally light or specialised — never a sparse "flat donor" case.
@@ -656,6 +766,7 @@ def classify_node(state: SessionState) -> dict[str, Any]:
         model_cls=DeckClassification,
     )
     classification_dump = classification.model_dump()
+    recovered_slides = _recover_dropped_slides(classification_dump, brief)
     thin_tables = _coerce_thin_tables(classification_dump)
     overflow_kpis = _coerce_overflow_kpis(classification_dump)
     injected_tables = _inject_parsed_tables(
@@ -666,6 +777,12 @@ def classify_node(state: SessionState) -> dict[str, Any]:
         classification_dump, arts.get("parsed_deck") or {})
     diversified = _diversify_text_slides(classification_dump, brief)
     arts["classification"] = classification_dump
+    for num in recovered_slides:
+        logger.warning(
+            "node.classify.slide_recovered",
+            session_id=state.session_id,
+            source_slide=num,
+        )
     if injected_tables:
         logger.info(
             "node.classify.parsed_tables_injected",
@@ -711,7 +828,8 @@ def classify_node(state: SessionState) -> dict[str, Any]:
                 parsed_charts_injected=injected_charts,
                 visual_image_routed=visual_routed["image"],
                 visual_flow_routed=visual_routed["flow"],
-                text_slides_diversified=diversified)
+                text_slides_diversified=diversified,
+                slides_recovered=len(recovered_slides))
     return {"artefacts": arts, "stage": Stage.CLASSIFYING.value, "progress_pct": 30}
 
 
