@@ -199,6 +199,8 @@ SAFE_H = SAFE_BOTTOM - SAFE_TOP    # 520
 # card text is unreadable; if it still won't fit at this size we truncate with
 # an ellipsis rather than render illegibly small or let it clip off the box.
 _CARD_BODY_MIN_PT = 11.0
+# Step (pt) for fine-grained shrink-to-fit of card body text.
+_CARD_BODY_SHRINK_STEP_PT = 0.5
 
 # Task 6 (numbered_columns width guard): a column must be wide enough to fit a
 # typical long Russian word at the body font (text_size≈15pt) without breaking
@@ -341,6 +343,20 @@ def _apply_ordered_to_paragraph(p, indent_emu=BULLET_INDENT_EMU):
     etree.SubElement(pPr, qn("a:buNone"))
 
 
+def _apply_marker_for_line(p, line, is_bullet):
+    """Apply the native list marker for ``line`` to paragraph ``p``.
+
+    Shared wiring for add_block/add_label. Bullet takes precedence over an
+    ordered marker; ``is_bullet`` is the flag returned by ``_detect_bullet``
+    (prefix already stripped at the call site). Detection logic unchanged.
+    """
+    if is_bullet:
+        _apply_bullet_to_paragraph(p)
+    elif _detect_ordered(line):
+        # D2: нумерованный список — номер остаётся в тексте, только отступ.
+        _apply_ordered_to_paragraph(p)
+
+
 def _apply_no_bullet_to_paragraph(p):
     """Явно отключить bullet — для строк без маркера в списке смешанного типа."""
     pPr = p._pPr
@@ -417,11 +433,7 @@ def add_block(slide, x, y, w, h, lines,
         p.alignment = align_enum
         # Auto-detect bullet — если строка начинается с ▪/■/•/-/* → native PP bullet
         is_bullet, clean_line = _detect_bullet(line)
-        if is_bullet:
-            _apply_bullet_to_paragraph(p)
-        elif _detect_ordered(line):
-            # D2: нумерованный список — номер остаётся в тексте, только отступ.
-            _apply_ordered_to_paragraph(p)
+        _apply_marker_for_line(p, line, is_bullet)
         # Native flow labels — leak-only (renderer config, no intentional **).
         clean_line = sanitize_text(clean_line)
         run = p.add_run()
@@ -460,11 +472,7 @@ def add_label(slide, x, y, w, h, text,
         p.alignment = align_enum
         # Auto-detect bullet
         is_bullet, clean_line = _detect_bullet(line)
-        if is_bullet:
-            _apply_bullet_to_paragraph(p)
-        elif _detect_ordered(line):
-            # D2: нумерованный список — номер остаётся в тексте, только отступ.
-            _apply_ordered_to_paragraph(p)
+        _apply_marker_for_line(p, line, is_bullet)
         # Native flow labels — leak-only (renderer config, no intentional **).
         clean_line = sanitize_text(clean_line)
         run = p.add_run()
@@ -931,7 +939,7 @@ def _fit_card_body(text, box_w_px, box_h_px, base_pt, bold=False):
     # ellipsis-truncated. Bounds: never below _CARD_BODY_MIN_PT.
     s = float(size)
     while s > _CARD_BODY_MIN_PT:
-        s = max(_CARD_BODY_MIN_PT, s - 0.5)
+        s = max(_CARD_BODY_MIN_PT, s - _CARD_BODY_SHRINK_STEP_PT)
         if _fits(s, text):
             return s, text
 
