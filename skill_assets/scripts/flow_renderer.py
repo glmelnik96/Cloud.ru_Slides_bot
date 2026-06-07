@@ -199,6 +199,15 @@ SAFE_H = SAFE_BOTTOM - SAFE_TOP    # 520
 # an ellipsis rather than render illegibly small or let it clip off the box.
 _CARD_BODY_MIN_PT = 11.0
 
+# Task 6 (numbered_columns width guard): a column must be wide enough to fit a
+# typical long Russian word at the body font (text_size≈15pt) without breaking
+# it mid-word. Measured with the brand OTF, common long words run ~150–210px at
+# 15pt; the textfit width check uses width_target=0.95, so a 180px column gives
+# ~171px of usable space — enough for the bulk of long words (взаимодействие,
+# инфраструктура ≈164px) while only the rarest outliers want a wider column.
+# Below this the renderer falls back to numbered_rows so words wrap on spaces.
+_MIN_COL_W = 180
+
 
 # ============================================================================
 # Низкоуровневые примитивы (можно импортировать отдельно для кастомных схем)
@@ -1138,6 +1147,19 @@ def render_numbered_columns(slide, cfg, dark=False):
     gap = cfg.get("gap", 32)
     top = cfg.get("content_top", SAFE_TOP)
     cw = int((SAFE_W - (n - 1) * gap) / n)
+    # Width guard: with many columns ``cw`` shrinks until typical Russian words
+    # break mid-word. When each column would be narrower than ``_MIN_COL_W``,
+    # fall back to numbered_rows in a 2-row grid (cols=2) — same items, but
+    # stacked number+title+text whose body wraps on spaces over the full slot
+    # height, so nothing breaks inside a word. Threshold uses the SAME width
+    # formula above, so the guard fires exactly when the columns are too narrow.
+    if cw < _MIN_COL_W:
+        rows_cfg = dict(cfg)
+        rows_cfg.pop("columns", None)
+        rows_cfg["rows"] = cols_data
+        rows_cfg.setdefault("cols", 2)
+        render_numbered_rows(slide, rows_cfg, dark=dark)
+        return
     num_h = 90
     num_y = SAFE_BOTTOM - num_h
     title_col = WHITE if dark else GRAPHITE
