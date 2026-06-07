@@ -471,6 +471,112 @@ def test_title_superset_body_line_not_recovered(monkeypatch) -> None:
     assert "ТРЕБОВАНИЯ ДЛЯ УСПЕШНОГО ЗАПУСКА" not in last_body
 
 
+# ── Part 1: recovery append cap (off-slide / cross-slide bleed guard) ──────
+
+
+def _two_column_artefacts(
+    *,
+    raw_body: list[str],
+    col1_body: str,
+    col2_body: str,
+    num: int = 5,
+    donor: int = 28,
+    title_content: str = "ДЕЙСТВИЯ В ОФИСЕ",
+) -> dict[str, Any]:
+    """Donor 28 = title(shape_idx 0) + col1_body(1) + col2_body(2), each
+    column ``max_chars: 250`` (see donor-slot-map.yaml). Builds the
+    placeholder_assignments keyed by the donor's real ph_idx map so
+    assemble_plan_node translates them to col1_body/col2_body.
+    """
+    from graph import donor_map
+
+    name_to_ph = {
+        name: ph for ph, name in donor_map.slot_name_by_ph_idx(donor).items()
+    }
+    phs = [
+        {"ph_idx": name_to_ph["title"], "content": title_content, "ph_type": "TITLE"},
+        {"ph_idx": name_to_ph["col1_body"], "content": col1_body, "ph_type": "BODY"},
+        {"ph_idx": name_to_ph["col2_body"], "content": col2_body, "ph_type": "BODY"},
+    ]
+    return {
+        "brief": {
+            "topic": "Deck",
+            "slide_count": 1,
+            "slides": [{"num": num, "raw_title": title_content, "raw_body": raw_body}],
+        },
+        "classification": {"slides": [{
+            "num": num, "category": "text",
+            "subcategory_hint": "", "rationale": "",
+        }]},
+        "layouts": {"slides": [{"num": num, "layout_idx": donor}]},
+        "content": {"slides": [{"slide_num": num, "placeholder_assignments": phs}]},
+        "infographics": {"slides": []},
+        "icons": {"slides": []},
+    }
+
+
+def test_pathological_recovery_is_capped_to_budget(monkeypatch) -> None:
+    """Part 1 — the ДЕЙСТВИЯ В ОФИСЕ reproduction.
+
+    A near-duplicate-heavy source slide yields a brief with MANY long
+    distinctive body lines. The distributor kept only one short anchor line,
+    so every other brief line shows as "uncovered" and recovery would dump a
+    huge wall of text into the last column (col2_body) — off-slide overflow.
+
+    The cap must bound how much is appended: the resulting col2_body stays
+    within the character budget (donor col ``max_chars`` 250, plus a small
+    slack), only a SUBSET of the dropped lines is kept, and the rest are
+    dropped. Earlier-appearing lines win.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    long_lines = [
+        f"Уникальная распоряжение номер {i} с подробным описанием действий "
+        f"сотрудника в офисном помещении при чрезвычайной ситуации сценарий {i}"
+        for i in range(1, 11)
+    ]
+    raw_body = ["Короткий якорный пункт\n" + "\n".join(long_lines)]
+    # Distributor kept ONLY the short anchor in col1; col2 is empty.
+    col1_body = "Короткий якорный пункт."
+    col2_body = ""
+    state = _make_state(_two_column_artefacts(
+        raw_body=raw_body, col1_body=col1_body, col2_body=col2_body,
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    last = slots["col2_body"]
+    # Bounded: never an off-slide wall. Budget = donor max_chars (250) plus a
+    # small slack for line joins.
+    assert len(last) <= 300, f"col2_body length {len(last)} exceeded budget"
+    # A subset was kept (not all 10 long lines).
+    kept = [ln for ln in last.split("\n") if ln.strip()]
+    assert 0 < len(kept) < 10
+    # Earliest lines win the budget.
+    assert "сценарий 1" in last
+
+
+def test_normal_small_recovery_unchanged_by_cap(monkeypatch) -> None:
+    """Part 1 — the cap must NOT bite on the normal case: a couple of
+    genuinely-dropped short lines are still fully recovered (regression
+    guard that the budget is generous for ordinary slides)."""
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Первый якорный распознаваемый пункт колонки\n"
+        "Второй потерянный короткий пункт\n"
+        "Третий потерянный короткий пункт"
+    ]
+    # Distributor kept only the anchor; two short lines genuinely dropped.
+    col1_body = "Первый якорный распознаваемый пункт колонки."
+    col2_body = ""
+    state = _make_state(_two_column_artefacts(
+        raw_body=raw_body, col1_body=col1_body, col2_body=col2_body,
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    last = slots["col2_body"]
+    assert "Второй потерянный короткий пункт" in last
+    assert "Третий потерянный короткий пункт" in last
+
+
 def test_timeline_donor_recovery_is_skipped(monkeypatch) -> None:
     """Task A Fix 2 — timeline donors have fixed-capacity stepN_body slots;
     appending recovered overflow into "the last body slot" is semantically

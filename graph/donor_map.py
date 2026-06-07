@@ -335,12 +335,33 @@ def is_timeline_donor(layout_idx: int) -> bool:
     return has_dates and has_steps
 
 
+def slot_max_chars(layout_idx: int, slot_name: str) -> int | None:
+    """Physical ``max_chars`` capacity of a single donor slot, or ``None``
+    when the donor/slot is unknown or carries no capacity hint.
+
+    Body-recovery uses this to bound how much recovered text it may append
+    to a column body slot (donor 28's columns are ``max_chars: 250``), so a
+    pathological brief can never produce an off-slide wall of text.
+    """
+    if not layout_idx:
+        return None
+    donor = _load().get(int(layout_idx))
+    if donor is None:
+        return None
+    slot = (donor.get("slots") or {}).get(slot_name)
+    if not isinstance(slot, dict):
+        return None
+    v = slot.get("max_chars")
+    return int(v) if isinstance(v, int) else None
+
+
 __all__ = [
     "slot_specs_for_layouts",
     "slot_name_by_ph_idx",
     "body_ph_indices",
     "body_slot_count",
     "is_timeline_donor",
+    "slot_max_chars",
     "reload",
     "valid_donor_ids",
     "category_equivalence",

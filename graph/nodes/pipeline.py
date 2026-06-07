@@ -509,6 +509,17 @@ _COVERAGE_THRESHOLD = 0.6
 # "is some kept line essentially a subset of this candidate?" — neutralising
 # the rephrase/merge double-content risk from a different angle than coverage.
 _DUPLICATE_THRESHOLD = 0.6
+# Recovery-append cap (off-slide / cross-slide bleed guard). On decks with
+# near-duplicate slides (e.g. the "ДЕЙСТВИЯ В ОФИСЕ" air-raid memo), every
+# near-duplicate brief line shows as "uncovered" against the distributed body,
+# so unbounded recovery dumps a wall of foreign-looking text into the last
+# (right) column → it overflows off-slide. Bound both the LINE COUNT and the
+# CHARACTER VOLUME appended to the target column.
+_MAX_RECOVERED_LINES = 3        # ≤3 genuinely-dropped lines is the normal case
+# Fallback character budget for the target column when the donor exposes no
+# max_chars (donor 28's columns are 250). Recovery may consume up to the
+# column's remaining capacity (budget − text already in the column).
+_RECOVERY_CHAR_BUDGET = 250
 
 
 # ─── cover title/subtitle swap-guard ─────────────────────────────────────────
@@ -617,6 +628,10 @@ def _recover_dropped_body_lines(
     brief_raw_body: list[str],
     slots: dict[str, Any],
     body_slot_names: list[str],
+    char_budget: int | None = None,
+    *,
+    session_id: str | None = None,
+    num: int | None = None,
 ) -> list[str]:
     """Append GENUINELY-dropped brief body lines into the last body slot.
     Mutates ``slots`` in place. Returns the recovered lines (empty in the
@@ -753,9 +768,47 @@ def _recover_dropped_body_lines(
 
     target = body_slot_names[-1]
     existing = str(slots.get(target) or "").strip()
-    addition = "\n".join(missing)
+
+    # Cap the append (Part 1 — off-slide / cross-slide bleed guard). On decks
+    # with near-duplicate slides every distinct brief line shows as
+    # "uncovered", so unbounded recovery dumps a wall of (foreign-looking) text
+    # into the last column and it overflows off-slide. Bound BOTH the line
+    # count and the character volume; keep the earliest lines (most relevant /
+    # already passed the coverage + duplicate + non-body gates) and DROP the
+    # rest. The cap is generous enough that the normal 1–3 dropped-line case is
+    # untouched — it only bites on pathological volume.
+    budget = char_budget if (char_budget and char_budget > 0) else _RECOVERY_CHAR_BUDGET
+    remaining = budget - len(existing)
+    kept: list[str] = []
+    used = 0
+    for bl in missing:
+        if len(kept) >= _MAX_RECOVERED_LINES:
+            break
+        # +1 accounts for the "\n" join cost (and the join to existing text).
+        cost = len(bl) + (1 if (kept or existing) else 0)
+        if kept and used + cost > remaining:
+            break
+        # Always allow at least the first line through even if it alone exceeds
+        # the budget (the render-layer column shrink/truncate net handles a
+        # single oversized line); never produce a multi-line off-slide wall.
+        kept.append(bl)
+        used += cost
+
+    dropped = len(missing) - len(kept)
+    if dropped > 0:
+        logger.info(
+            "assemble.recovery_capped",
+            session_id=session_id,
+            num=num,
+            kept=len(kept),
+            dropped=dropped,
+        )
+    if not kept:
+        return []
+
+    addition = "\n".join(kept)
     slots[target] = f"{existing}\n{addition}" if existing else addition
-    return missing
+    return kept
 
 
 def assemble_plan_node(state: SessionState) -> dict[str, Any]:
@@ -969,10 +1022,21 @@ def assemble_plan_node(state: SessionState) -> dict[str, Any]:
                 else:
                     src = cls.get("_source_slide") or num
                     brief_body_for_recovery = brief_body_by_num.get(src) or []
+                # Char budget = the target (last) body slot's donor max_chars
+                # (donor 28 columns are 250) so the recovery append can never
+                # exceed the column's physical capacity → no off-slide wall.
+                char_budget = (
+                    donor_map.slot_max_chars(int(donor), body_slot_names[-1])
+                    if body_slot_names
+                    else None
+                )
                 recovered = _recover_dropped_body_lines(
                     brief_body_for_recovery,
                     slots,
                     body_slot_names,
+                    char_budget,
+                    session_id=state.session_id,
+                    num=num,
                 )
                 if recovered:
                     logger.warning(

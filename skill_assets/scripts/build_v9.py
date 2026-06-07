@@ -22,6 +22,7 @@ Usage:
 import sys
 import json
 import os
+import re
 import copy
 from pptx import Presentation
 from pptx.util import Emu
@@ -210,6 +211,45 @@ def _slot_kind(slot_name):
     if slot_name == "body" or (slot_name[:4] == "body" and slot_name[4:].isdigit()):
         return "body"
     return "other"
+
+
+# Column-body slots (donor 28: col1_body / col2_body). They are kind="other"
+# (NOT line-balanced / NOT vertically centred — columns of different length
+# would misalign, see the body-anchor comment near the slot loop), so the
+# legacy char-count shrink and the body geo-balance never fire for them. A
+# pathological column (e.g. the "ДЕЙСТВИЯ В ОФИСЕ" right column) can therefore
+# overflow off-slide. _fit_column_body is the per-column safety net.
+_COL_BODY_RE = re.compile(r"^col(\d+)?_body$")
+
+
+def _fit_column_body(shape, base_pt, text, bold=False):
+    """Shrink→truncate fit for a column-body slot so its text physically fits
+    the column box, MIRRORING flow_renderer._fit_card_body but WITHOUT enabling
+    vertical-centering/line-balancing (columns must stay top-anchored or they
+    misalign). Returns ``(size_pt, text)`` — the size never grows above
+    ``base_pt`` and, as a last resort, the text is truncated on a word boundary
+    with an ellipsis so nothing clips off-slide.
+
+    No-op (returns ``(base_pt, text)``) when geofit/fonts are unavailable or the
+    box geometry is degenerate — never renders worse than before.
+    """
+    if not GEOFIT_AVAILABLE or not str(text or "").strip():
+        return base_pt, text
+    try:
+        box_w_px = shape.width / EMU_PER_PX
+        box_h_px = shape.height / EMU_PER_PX
+    except Exception:
+        return base_pt, text
+    if box_w_px <= 0 or box_h_px <= 0:
+        return base_pt, text
+    try:
+        from flow_renderer import _fit_card_body
+    except Exception:
+        return base_pt, text
+    try:
+        return _fit_card_body(str(text), box_w_px, box_h_px, float(base_pt), bold)
+    except Exception:
+        return base_pt, text
 
 
 def _typeface_of(tf, override):
@@ -775,6 +815,38 @@ def build(plan_path, template_path, output_path, donor_map_path):
                                     f"size_pt {sub_base}→{fitted}",
                                     file=sys.stderr,
                                 )
+                # Column-body overflow net: col1_body/col2_body are kind=
+                # "other" → never line-balanced and (donor 28) carry no
+                # safe_max_chars, so neither the geo body-balance nor the legacy
+                # char-shrink bounds them. A pathological column overflows
+                # off-slide (the "ДЕЙСТВИЯ В ОФИСЕ" right column). Mirror the
+                # card-body fit: shrink the font toward the min, then truncate on
+                # a word boundary with an ellipsis as a last resort. Runs AFTER
+                # geofit so it tightens whatever size was already chosen. Does
+                # NOT touch vertical-anchoring (columns stay top-anchored).
+                if _COL_BODY_RE.match(slot_name) and txt_str.strip():
+                    try:
+                        col_shape = list(actual.shapes)[shape_idx]
+                    except Exception:
+                        col_shape = None
+                    if col_shape is not None:
+                        col_base = (override or {}).get("size_pt") or base_size or 20
+                        _, col_bold = _typeface_of(tf, override)
+                        fit_pt, fit_txt = _fit_column_body(
+                            col_shape, col_base, str(new_text or ""), col_bold
+                        )
+                        if fit_pt < float(col_base) or fit_txt != str(new_text or ""):
+                            if fit_pt < float(col_base):
+                                override = dict(override or {})
+                                override["size_pt"] = fit_pt
+                            new_text = fit_txt
+                            print(
+                                f"autofit: slot={slot_name} donor={src_num} "
+                                f"len={len(txt_str)} column-fit "
+                                f"size_pt {col_base}→{fit_pt} "
+                                f"truncated={fit_txt != str(txt_str)}",
+                                file=sys.stderr,
+                            )
                 replace_text_with_style(tf, new_text, override)
                 # Geo soft-balance: centre short title/subtitle text vertically
                 # so it doesn't stick to the top of an oversized donor box.
