@@ -90,6 +90,13 @@ from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
 from pptx.oxml.ns import qn
 from lxml import etree
 
+try:
+    import textfit as _textfit
+    import font_resolver as _font_resolver
+    GEOFIT_AVAILABLE = True
+except ImportError:
+    GEOFIT_AVAILABLE = False
+
 
 EMU = 9525
 SLIDE_W_PX = 1280
@@ -773,6 +780,31 @@ def _wrapped_lines(text, usable_w_px, char_w_px):
     return max(1, -(-len(str(text)) // cpl))  # ceil
 
 
+def _real_lines(text, usable_w_px, font_pt, bold=False):
+    """Реальное число строк при переносе — по метрикам шрифта (Pillow), а не
+    по эвристике символов. add_label рисует textbox с нулевыми полями, поэтому
+    usable_w_px == ширине фрейма. При недоступном textfit — fallback на
+    char-эвристику _wrapped_lines (0.58·font_px), чтобы поведение не падало.
+
+    Эвристика _wrapped_lines систематически НЕДОсчитывает строки для кириллицы
+    (переносит по символам, не по словам), из-за чего тело карточки наезжало
+    на 3-строчный заголовок (дефект E). Реальный замер устраняет это.
+    """
+    if not text:
+        return 1
+    if GEOFIT_AVAILABLE:
+        try:
+            fp = _font_resolver.resolve(FONT, bold)
+            if fp:
+                lines, _longest, _h = _textfit._measure(
+                    str(text), fp, font_pt, int(usable_w_px), True)
+                if lines:
+                    return max(1, len(lines))
+        except Exception:
+            pass
+    return _wrapped_lines(text, usable_w_px, 0.58 * font_pt * 4.0 / 3.0)
+
+
 def compose_grid(blocks, area, cols=None, font_pt=16, gap=24,
                  pad=12, pad_bottom=16, v_center=True):
     """Грид-композиция блоков схемы (frame-to-text + сетка + единый кегль).
@@ -794,13 +826,12 @@ def compose_grid(blocks, area, cols=None, font_pt=16, gap=24,
     avail_w = right - left
     col_w = int((avail_w - (n_cols - 1) * gap) / max(1, n_cols))
     font_px = font_pt * 4.0 / 3.0
-    char_w = 0.58 * font_px      # консервативно (чуть шире) — чтобы не переполнить
     line_h = 1.30 * font_px
     usable_w = max(1, col_w - 2 * pad)
     # требуемая высота каждого блока (под текст)
     for b in blocks:
         lines = b.get("lines", []) or []
-        total = sum(_wrapped_lines(ln, usable_w, char_w) for ln in lines) if lines else 1
+        total = sum(_real_lines(ln, usable_w, font_pt) for ln in lines) if lines else 1
         b["_need_h"] = int(total * line_h + pad + pad_bottom)
     # высота строки = максимум по строке
     row_h = [0] * n_rows
@@ -995,8 +1026,10 @@ def render_card_grid(slide, cfg, dark=False):
         else:
             tx = x + pad
             tw = cw - 2 * pad
-            # высота заголовка под число строк (single/two-line)
-            t_lines = _wrapped_lines(title, tw, 0.58 * title_size * 4.0 / 3.0)
+            # высота заголовка под РЕАЛЬНОЕ число строк (метрики шрифта) —
+            # эвристика по символам недосчитывала строки кириллицы и тело
+            # наезжало на 3-строчный заголовок (дефект E).
+            t_lines = _real_lines(title, tw, title_size, bold=True)
             t_h = int(t_lines * 1.25 * title_size * 4.0 / 3.0) + 4
             if title:
                 add_label(slide, tx, y + pad, tw, t_h, title,
@@ -1080,8 +1113,7 @@ def render_hero_statement(slide, cfg, dark=False):
     while True:
         font_px = fs * 4.0 / 3.0
         line_h = 1.30 * font_px
-        char_w = 0.66 * font_px           # CAPS-буквы шире обычных
-        n_lines = _wrapped_lines(text_caps, inner_w, char_w)
+        n_lines = _real_lines(text_caps, inner_w, fs)
         bh = int(n_lines * line_h + 2 * 24)   # + верх/низ поля по 24
         if by + bh <= block_bottom_max or fs <= 32:
             break

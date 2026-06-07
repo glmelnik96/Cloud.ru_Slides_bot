@@ -237,6 +237,64 @@ def _inject_parsed_tables(
     return injected
 
 
+def _inject_parsed_charts(
+    classification_dump: dict[str, Any],
+    parsed_deck: dict[str, Any],
+) -> int:
+    """Restore ``chart_pptx_native`` with REAL plotted data for slides whose
+    source .pptx slide held a native chart object.
+
+    Defect D: ``parse_pptx`` now extracts chart series/categories, but the
+    LLM brief→classify chain loses them — the chart object never survives into
+    the lossy brief, so the classifier renders a flat text donor and the chart
+    is dropped ("0 pictures inserted"). Here we deterministically rebuild the
+    branded chart from the parsed data (mirrors ``_inject_parsed_tables``).
+
+    Only flat slides are overridden: a deliberate native the classifier chose
+    (kpi/chart/table/flow/image) and split parts are left untouched. Mutates in
+    place; returns the count of slides injected.
+    """
+    parsed_by_num: dict[int, dict[str, Any]] = {}
+    for ps in (parsed_deck.get("slides") or []):
+        n = ps.get("num")
+        if not isinstance(n, int):
+            continue
+        charts = [
+            c for c in (ps.get("charts") or [])
+            if (c.get("series") or []) and (c.get("x") or c.get("type") == "pie")
+        ]
+        if charts:
+            parsed_by_num[n] = {"chart": charts[0], "title": ps.get("title") or ""}
+    if not parsed_by_num:
+        return 0
+
+    injected = 0
+    for s in classification_dump.get("slides") or []:
+        if s.get("_split_part"):
+            continue
+        if s.get("slide_type") in (
+            "kpi_native", "chart_native", "chart_pptx_native",
+            "table_native", "flow_diagram_native", "image_native",
+        ):
+            continue
+        src = s.get("_source_slide") or s.get("num")
+        if not isinstance(src, int):
+            continue
+        entry = parsed_by_num.get(src)
+        if not entry:
+            continue
+        chart = dict(entry["chart"])
+        if not chart.get("title"):
+            chart["title"] = entry["title"]
+        s["slide_type"] = "chart_pptx_native"
+        s["category"] = "other"
+        s["chart"] = chart
+        for k in ("kpi", "table", "flow", "image"):
+            s[k] = None
+        injected += 1
+    return injected
+
+
 _MARKER_RE = re.compile(r"^\s*[\d]{1,2}\s*[.)]?\s*$")
 
 
@@ -365,6 +423,101 @@ def _inject_visual_slides(
     return {"image": img_n, "flow": flow_n}
 
 
+# Label/description separators a brief body item may use, in priority order.
+# A line like "Масштабируемость — рост до тысяч ядер" splits into a card
+# title ("Масштабируемость") + body ("рост до тысяч ядер").
+_CARD_SEP_RE = re.compile(r"\s+[—–-]\s+|:\s+")
+_F_MIN_CARDS = 3
+_F_MAX_CARDS = 8
+_F_PARALLEL_LEN = 90  # an item this short (no separator) still reads as a card
+
+
+def _card_from_body_item(raw: str) -> dict[str, str] | None:
+    """Split one brief body line into a card {title, text}.
+
+    Returns None for empty / pure-marker lines. Prefers a label/description
+    split on the first separator; falls back to the whole line as the title.
+    """
+    norm = " ".join(str(raw).replace("\x0b", " ").split())
+    if not norm or _MARKER_RE.match(norm):
+        return None
+    m = _CARD_SEP_RE.search(norm)
+    if m and 0 < m.start() <= 60:
+        title = norm[:m.start()].strip()
+        body = norm[m.end():].strip()
+    else:
+        title, body = norm, ""
+    return {"title": title, "text": body}
+
+
+def _diversify_text_slides(
+    classification_dump: dict[str, Any],
+    brief: dict[str, Any],
+) -> int:
+    """Promote flat ``text``/``multicolumn`` slides whose brief body is a
+    parallel list of >=3 short items into a ``card_grid`` flow native.
+
+    Defect F (low layout diversity): the classifier defaults multi-point
+    content to a flat "title + big text block" donor. When the source body is
+    actually a set of parallel labelled items, a branded card grid reads far
+    better. High-precision by design — only fires when the body looks like a
+    list of cards, not prose:
+
+      * >=3 and <=8 non-empty body items, AND
+      * a majority are "card-shaped" (carry a label separator OR are short).
+
+    Prose bodies (few long paragraphs) are left to the donor route + bullets
+    (defect C). Native slides, split parts, and already-typed slides are never
+    touched. Mutates in place; returns the count of slides promoted.
+    """
+    brief_by_num: dict[int, dict[str, Any]] = {}
+    for bs in (brief.get("slides") or []):
+        n = bs.get("num")
+        if isinstance(n, int):
+            brief_by_num[n] = bs
+    if not brief_by_num:
+        return 0
+
+    promoted = 0
+    for s in classification_dump.get("slides") or []:
+        if s.get("_split_part") or s.get("slide_type"):
+            continue
+        if s.get("category") not in ("text", "multicolumn"):
+            continue
+        src = s.get("_source_slide") or s.get("num")
+        bs = brief_by_num.get(src) if isinstance(src, int) else None
+        if not bs:
+            continue
+        raw_items = [str(x) for x in (bs.get("raw_body") or []) if str(x).strip()]
+        if len(raw_items) < _F_MIN_CARDS:
+            continue
+        cards = [c for c in (_card_from_body_item(r) for r in raw_items) if c]
+        if not (_F_MIN_CARDS <= len(cards) <= _F_MAX_CARDS):
+            continue
+        # Majority must be card-shaped (separator OR short) — else it's prose.
+        parallel = sum(
+            1 for c in cards
+            if c["text"] or len(c["title"]) <= _F_PARALLEL_LEN
+        )
+        if parallel < max(_F_MIN_CARDS, (len(cards) * 3 + 4) // 5):
+            continue
+        ncards = len(cards)
+        cols = 2 if ncards <= 4 else (3 if ncards <= 6 else 4)
+        header = (bs.get("raw_title") or "").strip()
+        s["slide_type"] = "flow_diagram_native"
+        s["category"] = "other"
+        s["flow"] = {
+            "header": header, "subtitle": "", "preset": "card_grid",
+            "cards": cards, "columns": [], "rows": [],
+            "statement": "", "support": "", "grid": False, "cols": cols,
+            "blocks": [], "arrows": [],
+        }
+        for k in ("kpi", "chart", "table", "image"):
+            s[k] = None
+        promoted += 1
+    return promoted
+
+
 # Categories the sparse detector inspects. Everything else (title/divider/
 # image/logo/pattern_bg/team/timeline/callout and all native slide_types)
 # is intentionally light or specialised — never a sparse "flat donor" case.
@@ -458,14 +611,23 @@ def classify_node(state: SessionState) -> dict[str, Any]:
     overflow_kpis = _coerce_overflow_kpis(classification_dump)
     injected_tables = _inject_parsed_tables(
         classification_dump, arts.get("parsed_deck") or {})
+    injected_charts = _inject_parsed_charts(
+        classification_dump, arts.get("parsed_deck") or {})
     visual_routed = _inject_visual_slides(
         classification_dump, arts.get("parsed_deck") or {})
+    diversified = _diversify_text_slides(classification_dump, brief)
     arts["classification"] = classification_dump
     if injected_tables:
         logger.info(
             "node.classify.parsed_tables_injected",
             session_id=state.session_id,
             count=injected_tables,
+        )
+    if injected_charts:
+        logger.info(
+            "node.classify.parsed_charts_injected",
+            session_id=state.session_id,
+            count=injected_charts,
         )
     if visual_routed["image"] or visual_routed["flow"]:
         logger.info(
@@ -486,13 +648,21 @@ def classify_node(state: SessionState) -> dict[str, Any]:
             session_id=state.session_id,
             count=overflow_kpis,
         )
+    if diversified:
+        logger.info(
+            "node.classify.text_slides_diversified",
+            session_id=state.session_id,
+            count=diversified,
+        )
     logger.info("node.classify.done", session_id=state.session_id,
                 slides=len(classification.slides),
                 thin_tables_coerced=thin_tables,
                 overflow_kpis_coerced=overflow_kpis,
                 parsed_tables_injected=injected_tables,
+                parsed_charts_injected=injected_charts,
                 visual_image_routed=visual_routed["image"],
-                visual_flow_routed=visual_routed["flow"])
+                visual_flow_routed=visual_routed["flow"],
+                text_slides_diversified=diversified)
     return {"artefacts": arts, "stage": Stage.CLASSIFYING.value, "progress_pct": 30}
 
 

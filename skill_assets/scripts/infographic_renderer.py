@@ -33,8 +33,55 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Pt
 
+try:
+    import textfit as _textfit
+    import font_resolver as _font_resolver
+    GEOFIT_AVAILABLE = True
+except ImportError:
+    GEOFIT_AVAILABLE = False
+
 
 _GRAPHITE = RGBColor(0x22, 0x22, 0x22)
+
+# Text-frame insets applied in _set_textframe (EMU); subtract from the box so
+# the geometric fitter measures the actual usable area.
+_TF_MARGIN_X_EMU = 60000
+_TF_MARGIN_Y_EMU = 20000
+# Floor for infographic card text — below this it's unreadable; better to let a
+# pathological string clip than render at 6pt.
+_INFOGRAPHIC_MIN_PT = 10.0
+
+
+def _fit_infographic_size(spec: dict[str, Any], width_emu: int, height_emu: int):
+    """Shrink a card text's font so it fits its box height/width.
+
+    Agent 06 sizes card-title and body boxes independently; a long card title
+    wraps to 3 lines and overflows downward into the body box below it (the
+    "title/body overlap" defect). Measuring against the real box height and
+    shrinking keeps each text contained. Returns the (possibly reduced)
+    font_size_pt, or the original on any failure."""
+    base = spec.get("font_size_pt")
+    if not GEOFIT_AVAILABLE or not base:
+        return base
+    text = spec.get("text") or ""
+    if not text.strip() or width_emu <= 0 or height_emu <= 0:
+        return base
+    font_path = _font_resolver.resolve(spec.get("font"), False)
+    if not font_path:
+        return base
+    res = _textfit.fit_text(
+        text,
+        box_w_emu=max(1, width_emu - 2 * _TF_MARGIN_X_EMU),
+        box_h_emu=max(1, height_emu - 2 * _TF_MARGIN_Y_EMU),
+        font_path=font_path,
+        base_pt=float(base),
+        min_pt=_INFOGRAPHIC_MIN_PT,
+        wrap=True,
+        balance=False,
+    )
+    if res is None:
+        return base
+    return res.size_pt
 
 
 def _parse_hex(value: Any) -> RGBColor | None:
@@ -132,7 +179,7 @@ def _add_filled_shape(slide, spec: dict[str, Any], mso_shape: int,
         _set_textframe(
             shape.text_frame, text,
             font=spec.get("font"),
-            size_pt=spec.get("font_size_pt"),
+            size_pt=_fit_infographic_size(spec, int(width), int(height)),
             color_hex=spec.get("font_color"),
             bold=False,
         )
@@ -192,7 +239,7 @@ def _add_textbox(slide, spec: dict[str, Any]) -> None:
     _set_textframe(
         box.text_frame, spec.get("text") or "",
         font=spec.get("font"),
-        size_pt=spec.get("font_size_pt"),
+        size_pt=_fit_infographic_size(spec, int(width), int(height)),
         color_hex=spec.get("font_color"),
     )
 

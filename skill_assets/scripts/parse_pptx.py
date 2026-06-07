@@ -32,6 +32,77 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 from visual_kind import classify_visual_kind
 
 
+# XL_CHART_TYPE (python-pptx enum) → our ChartConfig.type literal.
+# Keyed by enum .name so we don't import the (large) enum; unknown families
+# fall back to "bar" (the safest universal render).
+def _chart_type_of(xl_name: str) -> str:
+    n = (xl_name or "").upper()
+    if n.startswith("PIE") or n.startswith("DOUGHNUT"):
+        return "pie"
+    if n.startswith("LINE") or n.startswith("XY"):
+        return "line"
+    if n.startswith("AREA"):
+        if "100" in n:
+            return "area_100"
+        return "area_stacked"
+    # COLUMN_* / BAR_* and anything else → bar family
+    if "STACKED" in n:
+        return "bar_stacked"
+    return "bar"
+
+
+def _num(v):
+    """Coerce a chart cell to float; missing/blank → 0.0."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _extract_chart(shape):
+    """Pull a native PPTX chart object into a ChartConfig-shaped dict.
+
+    Returns None when the shape is not a chart or carries no plottable data.
+    Categories come from the first plot; each series yields {name, data:[float]}.
+    """
+    try:
+        if not getattr(shape, "has_chart", False):
+            return None
+        chart = shape.chart
+    except Exception:
+        return None
+    try:
+        ctype = _chart_type_of(getattr(chart.chart_type, "name", str(chart.chart_type)))
+    except Exception:
+        ctype = "bar"
+    try:
+        plots = list(chart.plots)
+        cats = [str(c) for c in plots[0].categories] if plots else []
+    except Exception:
+        cats = []
+    series = []
+    try:
+        for s in chart.series:
+            series.append({
+                "name": str(getattr(s, "name", "") or ""),
+                "data": [_num(v) for v in s.values],
+            })
+    except Exception:
+        pass
+    if not series:
+        return None
+    title = ""
+    try:
+        if chart.has_title and chart.chart_title.has_text_frame:
+            title = chart.chart_title.text_frame.text.strip()
+    except Exception:
+        pass
+    return {
+        "type": ctype, "title": title, "caption": "",
+        "x": cats, "series": series, "accent_idx": 0,
+    }
+
+
 def _walk_shapes(shapes, depth=0):
     """Flatten the shape tree, recursing into GROUP shapes.
 
@@ -86,6 +157,7 @@ def parse(input_path):
             "shapes_count": 0,
             "tables_count": 0,
             "tables": [],
+            "charts": [],
         }
 
         for shape in slide.shapes:
@@ -124,6 +196,21 @@ def parse(input_path):
                     "left_emu": shape.left, "top_emu": shape.top,
                     "width_emu": shape.width, "height_emu": shape.height,
                 })
+
+            # Native charts — extract the plotted data so downstream agents
+            # can regenerate a branded chart instead of dropping it (defect D:
+            # parse_pptx previously kept only PICTURE shapes, so PPTX chart
+            # objects vanished → "0 pictures inserted").
+            chart_cfg = _extract_chart(shape)
+            if chart_cfg is not None:
+                sdata["charts"].append(chart_cfg)
+                head = chart_cfg["title"] or "Диаграмма"
+                snames = ", ".join(s["name"] for s in chart_cfg["series"] if s["name"])
+                sdata["body"].append(
+                    f"{head}: {chart_cfg['type']} "
+                    f"({len(chart_cfg['x'])} категорий"
+                    + (f", ряды: {snames}" if snames else "") + ")"
+                )
 
             # Tables — extract real cell text so downstream agents can render
             # the actual data (previously only the count was kept, so table

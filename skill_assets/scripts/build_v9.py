@@ -80,6 +80,13 @@ except ImportError:
     def split_slot_if_body(_name, text):  # noqa: D401 — no-op fallback
         return text
 
+try:
+    import textfit as _textfit
+    import font_resolver as _font_resolver
+    GEOFIT_AVAILABLE = True
+except ImportError:
+    GEOFIT_AVAILABLE = False
+
 EMU_PER_PX = 9525
 
 # Geometry-aware subtitle fit (D-fix 2026-06-06): some title donors (e.g.
@@ -187,6 +194,140 @@ def _fit_title_no_midword_break(shape, base_pt, text):
     if pt < base_pt:
         return int(round(pt))
     return None
+
+
+# --- Geometric fitter (textfit + font_resolver) -------------------------------
+# Per-slot fit policy. Numbers are single big glyphs (no wrap); title/subtitle
+# may wrap to 2-3 lines and centre vertically when short; body stays
+# top-anchored multi-line. Floors keep text legible rather than micro-shrinking.
+_GEO_MIN_PT = {"title": 28.0, "subtitle": 14.0, "number": 24.0}
+_GEO_MIN_PT_BODY = 12.0
+
+
+def _slot_kind(slot_name):
+    if slot_name in ("title", "subtitle", "number"):
+        return slot_name
+    if slot_name == "body" or (slot_name[:4] == "body" and slot_name[4:].isdigit()):
+        return "body"
+    return "other"
+
+
+def _typeface_of(tf, override):
+    """Run typeface + bold for a text frame: override wins, else the donor's
+    first-run rPr, else (None, False)."""
+    family = (override or {}).get("font")
+    bold = (override or {}).get("bold")
+    if family is None or bold is None:
+        rPr = None
+        try:
+            p = tf._txBody.find(qn("a:p"))
+            r = p.find(qn("a:r")) if p is not None else None
+            rPr = r.find(qn("a:rPr")) if r is not None else None
+        except Exception:
+            rPr = None
+        if rPr is not None:
+            if family is None:
+                latin = rPr.find(qn("a:latin"))
+                family = latin.get("typeface") if latin is not None else None
+            if bold is None:
+                bold = rPr.get("b") == "1"
+    return family, bool(bold)
+
+
+def _geo_fit_slot(shape, tf, slot_name, base_pt, text, override):
+    """Geometric fit for one slot using real font metrics.
+
+    Side effect: enables word-wrap on non-number slots (donor wrap normaliser —
+    e.g. donor 5's title carries wrap="none" which forces a single clipped
+    line). Returns (size_pt, anchor_middle) or None to fall back to the legacy
+    char-count fitters (Pillow/font unavailable)."""
+    if not GEOFIT_AVAILABLE:
+        return None
+    kind = _slot_kind(slot_name)
+    family, bold = _typeface_of(tf, override)
+    font_path = _font_resolver.resolve(family, bold)
+    if not font_path:
+        return None
+    try:
+        box_w = shape.width
+        box_h = shape.height
+    except Exception:
+        return None
+    if kind != "number":
+        try:
+            tf.word_wrap = True
+        except Exception:
+            pass
+    res = _textfit.fit_text(
+        text,
+        box_w_emu=box_w,
+        box_h_emu=box_h,
+        font_path=font_path,
+        base_pt=float(base_pt or 20),
+        min_pt=_GEO_MIN_PT.get(kind, _GEO_MIN_PT_BODY),
+        wrap=(kind != "number"),
+        balance=(kind in ("title", "subtitle", "body")),
+    )
+    if res is None:
+        return None
+    return res.size_pt, res.anchor_middle
+
+
+# C (2026-06-07): bullet + spacing for multi-item body lists.
+# Donor body placeholders carry NO pPr at all (no bullet, no spcBef), so a
+# distributor/​bullet_splitter list of paragraphs stacks with zero gap and reads
+# as one solid wall (taxonomy defect C; live: 5d s4, 9b s5). When a body slot
+# holds ≥2 non-empty paragraphs we render it as a proper list: a "•" glyph with
+# a hanging indent + inter-item spacing (отбивка). Single-paragraph bodies are
+# left untouched — a conclusion is a paragraph, not a list.
+_BULLET_CHAR = "•"
+
+
+def _apply_body_bullets(tf, size_pt):
+    """Turn a body text-frame's paragraphs into a bulleted list (in place).
+
+    Skips when there are <2 non-empty paragraphs, or when the donor already
+    carries bullet formatting. Scales the hanging indent and spacing to the
+    effective font size so it stays proportional after a geofit shrink."""
+    try:
+        txBody = tf._txBody
+    except Exception:
+        return
+    paras = txBody.findall(qn("a:p"))
+    filled = [p for p in paras if (p.find(qn("a:r")) is not None
+              and "".join(t.text or "" for t in p.iter(qn("a:t"))).strip())]
+    if len(filled) < 2:
+        return
+    sz = float(size_pt or 18)
+    mar_l = int(round(sz * 9525))             # ~1em hanging indent (EMU)
+    spc_pts = int(round(sz * 100 * 0.35))     # отбивка ≈ 0.35×font (centi-pts)
+    for i, p in enumerate(filled):
+        pPr = p.find(qn("a:pPr"))
+        if pPr is None:
+            pPr = etree.Element(qn("a:pPr"))
+            p.insert(0, pPr)
+        # Donor already bulleted? leave it alone entirely.
+        if (pPr.find(qn("a:buChar")) is not None
+                or pPr.find(qn("a:buAutoNum")) is not None):
+            continue
+        pPr.set("marL", str(mar_l))
+        pPr.set("indent", str(-mar_l))
+        # Inter-item spacing on every item except the first (no gap above head).
+        for old in pPr.findall(qn("a:spcBef")):
+            pPr.remove(old)
+        if i > 0:
+            spcBef = etree.SubElement(pPr, qn("a:spcBef"))
+            spcPts = etree.SubElement(spcBef, qn("a:spcPts"))
+            spcPts.set("val", str(spc_pts))
+        # Bullet glyph. buFont=Arial for a reliable round glyph across renderers;
+        # the bullet inherits the run colour (graphite body text) by default.
+        for tag in ("a:buNone", "a:buChar", "a:buAutoNum", "a:buFont"):
+            for old in pPr.findall(qn(tag)):
+                pPr.remove(old)
+        buFont = etree.SubElement(pPr, qn("a:buFont"))
+        buFont.set("typeface", "Arial")
+        buChar = etree.SubElement(pPr, qn("a:buChar"))
+        buChar.set("char", _BULLET_CHAR)
 
 
 def clone_slide(prs, src_slide):
@@ -493,75 +634,128 @@ def build(plan_path, template_path, output_path, donor_map_path):
                 txt_str = str(new_text or "")
                 safe_max = slot_cfg.get("safe_max_chars") or slot_cfg.get("max_chars")
                 base_size = (override or {}).get("size_pt") or slot_cfg.get("size_pt")
-                if (safe_max and base_size and txt_str
-                        and len(txt_str) > int(safe_max)):
-                    # Linear shrink with 0.70 floor (below that titles become
-                    # unreadable; better to let it clip than render at 8pt).
-                    scale = max(0.70, float(safe_max) / float(len(txt_str)))
-                    shrunk_pt = max(14, int(round(float(base_size) * scale)))
-                    if shrunk_pt < int(base_size):
-                        override = dict(override or {})
-                        override["size_pt"] = shrunk_pt
-                        print(
-                            f"autofit: slot={slot_name} donor={src_num} "
-                            f"len={len(txt_str)} safe_max={safe_max} "
-                            f"size_pt {base_size}→{shrunk_pt}",
-                            file=sys.stderr,
-                        )
-                # Title mid-word-break guard: shrink large divider/title fonts
-                # so the longest word fits the box width on a single line.
-                if slot_name == "title" and txt_str.strip():
+                # Geometric fitter (primary): measure the rendered text against
+                # the box's real geometry, shrink to fit width+height, and
+                # request vertical centring when title/subtitle text underfills.
+                # Also normalises donor wrap="none" so titles wrap to 2-3 lines
+                # as designed (donor 5) instead of clipping on one line. Falls
+                # back to the legacy char-count guards below if Pillow/fonts are
+                # unavailable, so it can never render worse than before.
+                geo_anchor_middle = False
+                geo_done = False
+                if txt_str.strip():
                     try:
-                        ttl_shape = list(actual.shapes)[shape_idx]
+                        slot_shape = list(actual.shapes)[shape_idx]
                     except Exception:
-                        ttl_shape = None
-                    if ttl_shape is not None:
-                        ttl_base = (override or {}).get("size_pt") or base_size or 60
-                        fitted_t = _fit_title_no_midword_break(
-                            ttl_shape, ttl_base, txt_str
+                        slot_shape = None
+                    if slot_shape is not None:
+                        geo = _geo_fit_slot(
+                            slot_shape, tf, slot_name, base_size, txt_str, override
                         )
-                        if fitted_t is not None and fitted_t < float(ttl_base):
+                        if geo is not None:
+                            geo_done = True
+                            geo_size, geo_anchor_middle = geo
+                            if base_size and geo_size < float(base_size):
+                                override = dict(override or {})
+                                override["size_pt"] = geo_size
+                                print(
+                                    f"geofit: slot={slot_name} donor={src_num} "
+                                    f"len={len(txt_str)} size_pt {base_size}→{geo_size} "
+                                    f"anchor_mid={geo_anchor_middle}",
+                                    file=sys.stderr,
+                                )
+
+                # Legacy heuristic fitters — fallback only when geofit is off.
+                if not geo_done:
+                    if (safe_max and base_size and txt_str
+                            and len(txt_str) > int(safe_max)):
+                        # Linear shrink with 0.70 floor (below that titles become
+                        # unreadable; better to let it clip than render at 8pt).
+                        scale = max(0.70, float(safe_max) / float(len(txt_str)))
+                        shrunk_pt = max(14, int(round(float(base_size) * scale)))
+                        if shrunk_pt < int(base_size):
                             override = dict(override or {})
-                            override["size_pt"] = fitted_t
+                            override["size_pt"] = shrunk_pt
                             print(
-                                f"autofit: slot=title donor={src_num} "
-                                f"len={len(txt_str)} midword-fit "
-                                f"size_pt {ttl_base}→{fitted_t}",
+                                f"autofit: slot={slot_name} donor={src_num} "
+                                f"len={len(txt_str)} safe_max={safe_max} "
+                                f"size_pt {base_size}→{shrunk_pt}",
                                 file=sys.stderr,
                             )
-                # Subtitle overflow guard: geometry-aware fit for title-slide
-                # subtitle boxes that are too small/low for a full sentence.
-                if slot_name == "subtitle" and txt_str.strip():
-                    try:
-                        sub_shape = list(actual.shapes)[shape_idx]
-                    except Exception:
-                        sub_shape = None
-                    if sub_shape is not None:
-                        sub_base = (override or {}).get("size_pt") or base_size or 20
-                        fitted = _fit_subtitle_box(sub_shape, sub_base, txt_str)
-                        if fitted is not None and fitted < float(sub_base):
-                            override = dict(override or {})
-                            override["size_pt"] = fitted
-                            print(
-                                f"autofit: slot=subtitle donor={src_num} "
-                                f"len={len(txt_str)} geom-fit "
-                                f"size_pt {sub_base}→{fitted}",
-                                file=sys.stderr,
+                    # Title mid-word-break guard: shrink large divider/title fonts
+                    # so the longest word fits the box width on a single line.
+                    if slot_name == "title" and txt_str.strip():
+                        try:
+                            ttl_shape = list(actual.shapes)[shape_idx]
+                        except Exception:
+                            ttl_shape = None
+                        if ttl_shape is not None:
+                            ttl_base = (override or {}).get("size_pt") or base_size or 60
+                            fitted_t = _fit_title_no_midword_break(
+                                ttl_shape, ttl_base, txt_str
                             )
+                            if fitted_t is not None and fitted_t < float(ttl_base):
+                                override = dict(override or {})
+                                override["size_pt"] = fitted_t
+                                print(
+                                    f"autofit: slot=title donor={src_num} "
+                                    f"len={len(txt_str)} midword-fit "
+                                    f"size_pt {ttl_base}→{fitted_t}",
+                                    file=sys.stderr,
+                                )
+                    # Subtitle overflow guard: geometry-aware fit for title-slide
+                    # subtitle boxes that are too small/low for a full sentence.
+                    if slot_name == "subtitle" and txt_str.strip():
+                        try:
+                            sub_shape = list(actual.shapes)[shape_idx]
+                        except Exception:
+                            sub_shape = None
+                        if sub_shape is not None:
+                            sub_base = (override or {}).get("size_pt") or base_size or 20
+                            fitted = _fit_subtitle_box(sub_shape, sub_base, txt_str)
+                            if fitted is not None and fitted < float(sub_base):
+                                override = dict(override or {})
+                                override["size_pt"] = fitted
+                                print(
+                                    f"autofit: slot=subtitle donor={src_num} "
+                                    f"len={len(txt_str)} geom-fit "
+                                    f"size_pt {sub_base}→{fitted}",
+                                    file=sys.stderr,
+                                )
                 replace_text_with_style(tf, new_text, override)
-                # Body-text слоты: принудительно TOP vertical-anchor. Донорские
-                # body-плейсхолдеры шаблона якорятся ПО НИЗУ (vanchor=BOTTOM,
-                # template slide 21/22), поэтому короткий текст тонет к низу
-                # бокса, оставляя верх слайда пустым (dl1 slide-5/6 imbalance).
-                # Title/number/quote/subtitle сохраняют свой дизайнерский якорь.
+                # Geo soft-balance: centre short title/subtitle text vertically
+                # so it doesn't stick to the top of an oversized donor box.
+                if geo_anchor_middle and slot_name in ("title", "subtitle"):
+                    try:
+                        from pptx.enum.text import MSO_ANCHOR
+                        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+                    except Exception:
+                        pass
+                # Body-text слоты: вертикальный якорь.
+                # Донорские body-плейсхолдеры шаблона якорятся ПО НИЗУ
+                # (vanchor=BOTTOM, template slide 21/22) → короткий текст тонет к
+                # низу бокса (dl1 slide-5/6). Поэтому по умолчанию форсируем TOP.
+                # B (2026-06-07): если текст НЕДОзаполняет крупный body-бокс
+                # (geo_anchor_middle: высота блока < 55% бокса), центрируем по
+                # вертикали — иначе контент липнет к верху и слайд top-heavy
+                # (низ 55-60% пустой). Геометрию не двигаем, только якорь.
+                # Колоночные body (col1_body…) — kind="other", сюда не попадают:
+                # их центрировать нельзя, иначе колонки разной длины разъедутся.
                 if slot_name == "body" or (
                     slot_name[:4] == "body" and slot_name[4:].isdigit()
                 ):
                     try:
                         from pptx.enum.text import MSO_ANCHOR
-                        tf.vertical_anchor = MSO_ANCHOR.TOP
+                        tf.vertical_anchor = (
+                            MSO_ANCHOR.MIDDLE if geo_anchor_middle
+                            else MSO_ANCHOR.TOP
+                        )
                     except Exception:
                         pass
+                    # C: multi-item body → bulleted list with отбивка so the
+                    # points don't merge into a wall (donors carry no pPr).
+                    eff_size = (override or {}).get("size_pt") or base_size or 18
+                    _apply_body_bullets(tf, eff_size)
 
             # Очистить незаполненные обязательные слоты
             for slot_name, slot_def in slot_defs.items():

@@ -93,20 +93,22 @@ def test_long_title_shrinks(tmp_workdir) -> None:
     assert size >= 14.0
 
 
-def test_extreme_title_hits_70pct_floor(tmp_workdir) -> None:
-    """For very long titles the linear scale clamps at 70% of base.
+def test_extreme_title_clamps_at_geo_floor(tmp_workdir) -> None:
+    """For very long titles the geometric fitter shrinks to its title floor.
 
-    Without the floor we'd land at unreadable sub-14pt sizes. Uses a long
-    but word-breakable title so the linear floor (not the mid-word-break
-    guard) is the binding constraint.
+    The primary path is now textfit (real font metrics), which measures the
+    wrapped block and clamps at the 28pt title floor rather than the legacy
+    70%×base (42pt) linear floor. Intent preserved: stay readable (≥28pt),
+    never micro-shrink to sub-14pt. Uses word-breakable text so the floor —
+    not the mid-word-break guard — is the binding constraint.
     """
     extreme = ("Облако " * 50).strip()  # ~349 chars, short breakable words
     assert len(extreme) > 55 * 2
     out = _build_with_title(tmp_workdir, extreme)
     size = _read_title_run_size_pt(out)
     assert size is not None
-    # 70% × 60pt = 42pt — should not go below that.
-    assert size >= 42.0 - 0.5
+    # Geo title floor is 28pt — readable, and below the old 42pt linear floor.
+    assert 28.0 - 0.5 <= size < 60.0
 
 
 def test_single_unbreakable_word_shrinks_below_linear_floor(tmp_workdir) -> None:
