@@ -1,6 +1,8 @@
 # Slides Bot — Implementation Plan
 
-**Source of truth:** этот документ. `HANDOFF-pptx-bot.md` — исходный замысел, расхождения с реальностью Cloud.ru FM зафиксированы здесь.
+> ⚠️ **Исторический blueprint.** Milestones M1-M6 реализованы; проект в фазе доводки качества вёрстки. Актуальная структура и запуск — в `README.md`, актуальное состояние пайплайна — в коде (`graph/graph.py`, `graph/nodes/`). Этот документ сохранён как исходный замысел архитектуры и модельного стека.
+
+**Original source of truth:** этот документ. `HANDOFF-pptx-bot.md` — исходный замысел, расхождения с реальностью Cloud.ru FM зафиксированы здесь.
 
 **Last decision date:** 2026-06-04
 

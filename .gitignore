@@ -29,3 +29,7 @@ build/
 
 # Local diagnostic dumps (template/result inspectors, ad-hoc plan.json copies)
 .tmp_diag/
+
+# Scratch run artefacts (live-run outputs, PNG renders, audits). Reusable
+# harness kept locally: tmp/live_inputs/ (reference decks) + tmp/_*.sh|_*.py.
+tmp/

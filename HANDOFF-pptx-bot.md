@@ -3,7 +3,7 @@
 **Project:** Telegram-бот для автоматической вёрстки `.pptx` презентаций
 по фирменному стилю Cloud.ru.
 **Owner:** Глеб Мельников · Cloud.ru in-house motion/video design team
-**Status:** Ready for implementation
+**Status:** Реализовано — исторический handoff (актуальное состояние — в `README.md`)
 **Last updated:** 2026-06-03
 
 ---
