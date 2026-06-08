@@ -124,7 +124,12 @@ ROLES: dict[Role, RoleSpec] = {
     Role.OUTLINE_BUILDER:
         RoleSpec(model="zai-org/GLM-5.1", max_tokens=1200, extra_body=_GLM_THINKING_OFF),
     Role.PIXEL_JUDGE:
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=2000, requires_vision=True),
+        # Kimi vision always reasons; single-slide verdict output is tiny
+        # (ok + a few issue strings) but reasoning alone eats ~4-4.7k tokens,
+        # so 2000 truncated to content_len=0 and forced an auto-bump retry on
+        # every QA call (observed 2026-06-08 live). 6000 covers reasoning +
+        # verdict with margin and removes the wasted round-trip.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=6000, requires_vision=True),
 
     # ── /design designer skill ─────────────────────────────────────────────
     Role.ART_DIRECTOR:

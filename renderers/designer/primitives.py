@@ -277,8 +277,16 @@ def title_block(slide, text: str, rect_px, size_pt: int = 44,
     """
     left, top, w, h = rect_px
     color = WHITE if dark_bg else GRAPHITE
-    fit_pt, centred, lines = _fit(text, w, h, base_pt=float(size_pt), min_pt=20.0,
-                                  semibold=True, wrap=True, balance=True)
+    # LibreOffice packs slightly more text per line than the Pillow metric _fit
+    # uses, so _fit can over-count lines (estimate 2 where LO renders 1). That
+    # detaches the accent underline far below a single-line title, because the
+    # bar is anchored to the estimated multi-line block height. Make the
+    # line/size decision against a marginally wider box to match LO's packing;
+    # the real textbox keeps width w (LO still fits the text — it renders
+    # narrower than the metric), so nothing overflows.
+    fit_pt, centred, lines = _fit(text, w * 1.10, h, base_pt=float(size_pt),
+                                  min_pt=20.0, semibold=True, wrap=True,
+                                  balance=True)
 
     tb = slide.shapes.add_textbox(px(left), px(top), px(w), px(h))
     tf = tb.text_frame
@@ -319,7 +327,11 @@ def display_title(slide, text: str, rect_px, *, dark_bg: bool = False,
     left, top, w, h = rect_px
     if color is None:
         color = WHITE if dark_bg else GRAPHITE
-    fit_pt, _, _ = _fit(text, w, h, base_pt=max_pt, min_pt=40.0,
+    # min_pt is low so an over-long title (e.g. a run-on памятка heading) still
+    # shrinks to fit the box height instead of bleeding off-canvas and over the
+    # subtitle. _fit honours the box height (line-count × line-height ≤ h), so a
+    # normal short cover title still lands near max_pt.
+    fit_pt, _, _ = _fit(text, w, h, base_pt=max_pt, min_pt=22.0,
                         semibold=True, wrap=True, balance=True)
     tb = slide.shapes.add_textbox(px(left), px(top), px(w), px(h))
     tf = tb.text_frame

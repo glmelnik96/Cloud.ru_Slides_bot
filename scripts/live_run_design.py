@@ -15,6 +15,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Windows consoles default to cp1251; LLM-authored strings (e.g. vision-QA
+# issues) can contain characters outside it like '×' (U+00D7), which makes
+# structlog's stdout print raise UnicodeEncodeError and crash the whole paid
+# run. Force UTF-8 with a safe fallback BEFORE structlog binds its PrintLogger.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 - older/odd streams: best-effort only
+        pass
+
 from dotenv import load_dotenv
 
 # Load .env: prefer the worktree's own, fall back to the sibling main repo
@@ -94,10 +104,15 @@ def main() -> int:
     comps = arts.get("compositions") or []
     print(f"compositions:   {len(comps)}", flush=True)
     for c in comps:
-        blocks = c.get("blocks") or []
-        roles = [b.get("role") for b in blocks]
-        print(f"  slide {c.get('slide_num')}: tone={c.get('tone')} "
-              f"blocks={len(blocks)} roles={roles}", flush=True)
+        if c.get("layout"):
+            print(f"  slide {c.get('slide_num')}: tone={c.get('tone')} "
+                  f"layout={c.get('layout')} content_keys={sorted((c.get('content') or {}).keys())}",
+                  flush=True)
+        else:
+            blocks = c.get("blocks") or []
+            roles = [b.get("role") for b in blocks]
+            print(f"  slide {c.get('slide_num')}: tone={c.get('tone')} "
+                  f"blocks={len(blocks)} roles={roles}", flush=True)
 
     # Persist the raw Compositions (DSL) so the deck can be re-assembled later
     # WITHOUT another paid LLM run — assembly is deterministic, so iterating on

@@ -40,6 +40,14 @@ MARGIN = 40  # safe-area margin in px (brandbook micro-module multiple)
 # the last grid row (r=10) never bleeds past it (was ending at 680px).
 MARGIN_BOTTOM = 60
 
+# Top-right cloud.ru wordmark lockup occupies x≈1068..1230, y≈36..66
+# (see layouts.brand_logo top_right). A full-width free-grid title band would
+# run its text under that lockup, so a title starting in the wordmark's vertical
+# band has its right edge capped here (20px gap), mirroring the skeleton title
+# band which already reserves this zone.
+_WORDMARK_LEFT = 1048
+_WORDMARK_BAND_BOTTOM = 75
+
 
 def _snap2(v: float) -> float:
     """Snap to the 2px brand micromodule (every offset divisible by 2)."""
@@ -131,14 +139,24 @@ def _deoverlap_rects(items):
     for members in clusters.values():
         if len(members) < 2:
             continue
-        # Stable top-to-bottom sweep within the cluster.
+        # Stable top-to-bottom sweep within the cluster. A block is pushed down
+        # only by ALREADY-PLACED blocks it ACTUALLY x-overlaps — not by every
+        # block in the cluster. Union-find groups transitively (e.g. a
+        # full-width title bridges all side-by-side content into one cluster),
+        # so a naive running-bottom would cascade non-overlapping siblings into
+        # a diagonal staircase. Per-block x-overlap keeps side-by-side blocks on
+        # the same row while still stacking truly-overlapping ones.
         members.sort(key=lambda i: (items[i][1][1], items[i][1][0]))
-        prev_bottom = None
+        placed: list[tuple[float, float, float, float]] = []
         for i in members:
             key, (left, top, w, h) = items[i][0], rect_for[items[i][0]]
-            if prev_bottom is not None and top < prev_bottom:
-                # Collides with the running bottom -> push this block down.
-                new_top = _snap2(prev_bottom + _DEOVERLAP_GAP)
+            floor = max(
+                (pt + ph + _DEOVERLAP_GAP
+                 for (pl, pt, pw, ph) in placed if _x_overlap((left, 0, w, 0), (pl, 0, pw, 0))),
+                default=None,
+            )
+            if floor is not None and top < floor:
+                new_top = _snap2(floor)
                 if new_top + h > bottom_limit:
                     # Cannot fit at full height: clamp + compress.
                     new_top = min(new_top, bottom_limit - _MIN_BLOCK_H)
@@ -146,7 +164,7 @@ def _deoverlap_rects(items):
                     h = _snap2(max(_MIN_BLOCK_H, bottom_limit - new_top))
                 top = new_top
                 rect_for[key] = (left, top, w, h)
-            prev_bottom = top + h
+            placed.append((left, top, w, h))
     return rect_for
 
 
@@ -342,6 +360,12 @@ def assemble_slide(prs: Presentation, comp: Composition) -> None:
         return
 
     P.background(slide, comp.background.kind)
+    # Brand chrome: the cloud.ru wordmark top-right, matching the skeleton
+    # content slides and the reference template. Free-grid content slides
+    # otherwise carried no wordmark (only an LLM outline-corner), which read as
+    # off-brand next to the skeleton slides. The redundant top-right outline
+    # corner is suppressed below so the two don't collide.
+    L.brand_logo(slide, corner="top_right", dark_bg=dark)
 
     # De-overlap pass: compute adjusted px rects for all CONTENT (area) blocks
     # ONCE, keyed by id(blk). The same adjusted rects feed both the node
@@ -376,25 +400,49 @@ def assemble_slide(prs: Presentation, comp: Composition) -> None:
             node_rects.append(rect_for[id(blk)])
     node_centers = [(l + w / 2, t + h / 2) for (l, t, w, h) in node_rects]
 
+    # Connector index base detection: the composer sometimes numbers nodes
+    # 1-based (src/dst in 1..N) instead of 0-based (0..N-1). Detect it once over
+    # ALL connectors — if every index is in 1..N and at least one reaches N
+    # (out of 0-based range), the whole slide is 1-based, so shift by -1.
+    conn_idx = [v for blk in comp.blocks if blk.role == "connector"
+                for v in (blk.src, blk.dst)]
+    n_nodes = len(node_centers)
+    conn_offset = (
+        -1 if conn_idx and n_nodes and min(conn_idx) >= 1
+        and max(conn_idx) == n_nodes else 0
+    )
+
     for blk in comp.blocks:
         role = blk.role
         if role == "decor":
             if blk.kind == "sparkle":
                 P.sparkle(slide, blk.anchor, dark_bg=dark)
             elif blk.kind == "outline_corner":
-                P.outline_corner(slide, blk.anchor, dark_bg=dark)
+                # Top corners are reserved: the cloud.ru wordmark owns the
+                # top-right, and the slide title band owns the top-left. A
+                # corner bracket in either would collide, so only the bottom
+                # corners may carry one.
+                if blk.anchor not in ("top_right", "top_left"):
+                    P.outline_corner(slide, blk.anchor, dark_bg=dark)
             elif blk.kind == "portal":
                 P.portal(slide, _portal_base(blk.anchor), n=blk.portal_squares,
                          dark_bg=dark)
             continue
         if role == "connector":
-            if 0 <= blk.src < len(node_centers) and 0 <= blk.dst < len(node_centers):
-                p0 = _edge_point(node_rects[blk.src], node_centers[blk.dst])
-                p1 = _edge_point(node_rects[blk.dst], node_centers[blk.src])
+            src, dst = blk.src + conn_offset, blk.dst + conn_offset
+            if 0 <= src < n_nodes and 0 <= dst < n_nodes and src != dst:
+                p0 = _edge_point(node_rects[src], node_centers[dst])
+                p1 = _edge_point(node_rects[dst], node_centers[src])
                 P.arrow(slide, p0, p1, rhombus=blk.rhombus, dark_bg=dark)
             continue
         rect = rect_for[id(blk)]
         if role == "title":
+            rl, rt, rw, rh = rect
+            # Reserve the top-right wordmark zone: a title that starts in the
+            # wordmark's vertical band has its right edge capped so its text
+            # wraps before running under the cloud.ru lockup.
+            if rt < _WORDMARK_BAND_BOTTOM and rl + rw > _WORDMARK_LEFT:
+                rect = (rl, rt, max(_MIN_BLOCK_H, _WORDMARK_LEFT - rl), rh)
             P.title_block(slide, blk.text, rect, size_pt=blk.size_pt,
                           accent_underline=blk.accent_underline, dark_bg=dark)
         elif role == "body":
