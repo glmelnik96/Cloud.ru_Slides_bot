@@ -21,7 +21,7 @@ from bot.handlers.document import on_document
 from bot.handlers.placeholders import audit, brief
 from bot.handlers.resume import resume
 from bot.handlers.start import mode_picked, start
-from bot.handlers.verstai import verstai
+from bot.handlers.verstai import design, verstai
 from bot.logging_setup import configure_logging
 from bot.queue_dispatch import recover_queue_on_startup
 
@@ -39,6 +39,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(mode_picked, pattern=r"^mode:"))
     app.add_handler(CommandHandler("verstai", verstai))
+    app.add_handler(CommandHandler("design", design))
     app.add_handler(CommandHandler("audit", audit))
     app.add_handler(CommandHandler("brief", brief))
     app.add_handler(CommandHandler("resume", resume))

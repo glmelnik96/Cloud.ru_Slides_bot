@@ -11,7 +11,7 @@ import structlog
 from celery.exceptions import SoftTimeLimitExceeded
 
 from graph.graph import get_compiled_graph, thread_config
-from schemas.session import SessionInput, SessionState
+from schemas.session import Mode, SessionInput, SessionState
 from worker import progress
 from worker.celery_app import app
 
@@ -30,7 +30,13 @@ def run_pipeline(self, payload: dict[str, Any]) -> dict[str, Any]:
     log = logger.bind(session_id=state.session_id, user_id=state.user_id, task_id=self.request.id)
     log.info("pipeline.start", mode=state.mode)
     try:
-        graph = get_compiled_graph()
+        # /design uses the standalone from-scratch designer graph; everything
+        # else (verstai/audit/brief) stays on the donor pipeline graph.
+        if state.mode == Mode.DESIGN.value:
+            from graph.designer.graph import get_compiled_designer_graph
+            graph = get_compiled_designer_graph()
+        else:
+            graph = get_compiled_graph()
         final = graph.invoke(state.model_dump(), cfg)
         log.info("pipeline.done", final_stage=final.get("stage"))
         return {"ok": True, "session_id": state.session_id, "stage": final.get("stage")}

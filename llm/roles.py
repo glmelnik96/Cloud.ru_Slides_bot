@@ -41,6 +41,11 @@ class Role(str, Enum):
     OUTLINE_BUILDER = "outline_builder"
     PIXEL_JUDGE = "pixel_judge"
 
+    # ── /design from-scratch designer skill (separate graph) ───────────────
+    ART_DIRECTOR = "art_director"            # combined locked-stub — GLM ON
+    SLIDE_COMPOSER = "slide_composer"        # Composition DSL emit — GLM OFF
+    BRAND_CRITIC_V2 = "brand_critic_v2"      # READY/NOT-READY gate — GLM ON
+
 
 @dataclass(frozen=True)
 class RoleSpec:
@@ -119,5 +124,27 @@ ROLES: dict[Role, RoleSpec] = {
     Role.OUTLINE_BUILDER:
         RoleSpec(model="zai-org/GLM-5.1", max_tokens=1200, extra_body=_GLM_THINKING_OFF),
     Role.PIXEL_JUDGE:
-        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=2000, requires_vision=True),
+        # Kimi vision always reasons; single-slide verdict output is tiny
+        # (ok + a few issue strings) but reasoning alone eats ~4-4.7k tokens,
+        # so 2000 truncated to content_len=0 and forced an auto-bump retry on
+        # every QA call (observed 2026-06-08 live). 6000 covers reasoning +
+        # verdict with margin and removes the wasted round-trip.
+        RoleSpec(model="moonshotai/Kimi-K2.6", max_tokens=6000, requires_vision=True),
+
+    # ── /design designer skill ─────────────────────────────────────────────
+    Role.ART_DIRECTOR:
+        # Combined tonality+motifs in ONE call (q3 A/B verdict 2026-06-08:
+        # combined beat split on cost, latency AND quality). Thinking ON —
+        # q3 used GLM-5.1 thinking-ON and emitted ~1572 completion tokens
+        # over 4180 reasoning chars. 2500 covers it with margin.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500),
+    Role.SLIDE_COMPOSER:
+        # Per-slide Composition DSL (blocks on a 12×10 grid). GLM OFF for
+        # stable nested JSON. Charts/nodes/cards push output up; 6000 mirrors
+        # the DISTRIBUTOR envelope for big slides.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=6000, extra_body=_GLM_THINKING_OFF),
+    Role.BRAND_CRITIC_V2:
+        # The gate. Thinking ON for harshest recall (same rationale as the
+        # legacy BRAND_GUARDIAN_CRITIC). Emits READY/NOT-READY + reasons.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=2500),
 }

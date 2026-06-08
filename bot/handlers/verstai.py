@@ -62,8 +62,16 @@ def _is_pptx(doc: Document) -> bool:
     return name.endswith(".pptx") or doc.mime_type == _PPTX_MIME
 
 
-@guarded
-async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _dispatch_pptx_job(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, *, mode: Mode, log_prefix: str,
+) -> None:
+    """Shared pptx-upload → enqueue flow for the .pptx-driven modes.
+
+    /verstai (donor pipeline) and /design (from-scratch designer) take the same
+    input — a .pptx — and differ only by the ``mode`` threaded into SessionInput
+    and the log namespace. Everything else (download, size cap, global run-slot,
+    queue, progress subscriber) is identical.
+    """
     user = update.effective_user
     chat_id = update.effective_chat.id
 
@@ -85,7 +93,7 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id=user.id,
         chat_id=chat_id,
         progress_message_id=0,  # filled in after we send the status message
-        mode=Mode.VERSTAI,
+        mode=mode,
         # M5 will upload to S3 and set a real key here. M3 interim: download
         # to a stable local path and pass the absolute path through this same
         # field. parse_node (graph/nodes/pipeline.py) treats a non-empty value
@@ -103,7 +111,7 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(custom_path=str(local_path))
     except TelegramError as e:
-        logger.exception("verstai.download_failed", error=str(e),
+        logger.exception(f"{log_prefix}.download_failed", error=str(e),
                          session_id=inp.session_id, file_id=doc.file_id)
         await update.message.reply_text(
             "Не удалось скачать файл из Telegram. Попробуйте отправить ещё раз."
@@ -139,7 +147,7 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text=f"⏳ В очереди, позиция {position}. Начну, как освободится воркер.",
             parse_mode=ParseMode.HTML,
         )
-        logger.info("verstai.queued", session_id=inp.session_id,
+        logger.info(f"{log_prefix}.queued", session_id=inp.session_id,
                     user_id=user.id, position=position)
         return
 
@@ -148,7 +156,7 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         async_result = run_pipeline.delay(inp.model_dump(mode="json"))
     except Exception as e:  # noqa: BLE001
         release_global_lock(inp.session_id)
-        logger.exception("verstai.enqueue_failed", error=str(e))
+        logger.exception(f"{log_prefix}.enqueue_failed", error=str(e))
         await update.message.reply_text("Не удалось поставить задачу. Попробуйте позже.")
         return
 
@@ -169,8 +177,18 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         on_terminal=make_on_terminal(context.application),
     )
     logger.info(
-        "verstai.enqueued",
+        f"{log_prefix}.enqueued",
         session_id=inp.session_id,
         task_id=async_result.id,
         user_id=user.id,
     )
+
+
+@guarded
+async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_pptx_job(update, context, mode=Mode.VERSTAI, log_prefix="verstai")
+
+
+@guarded
+async def design(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_pptx_job(update, context, mode=Mode.DESIGN, log_prefix="design")
