@@ -181,17 +181,21 @@ def background(slide, kind: str) -> None:
         _dot_pattern(slide)
 
 
-def _dot_pattern(slide, step_px: int = 120, dot_px: int = 4) -> None:
+def _dot_pattern(slide, step_px: int = 120, dot_px: int = 4, *,
+                 bbox: tuple[int, int, int, int] | None = None) -> None:
     """Sparse dot texture (brandbook p.26).
 
     Coarse and HARD-CAPPED so a dots background never exceeds ~60 shapes.
+    bbox=(x0, y0, x1, y1) confines the grid to a region (e.g. a cover's
+    bottom-left corner); default spans the full canvas.
     """
     light = RGBColor.from_string("ECEEF0")
+    x0, y0, x1, y1 = bbox if bbox else (60, 60, 1240, 700)
     cap, drawn = 60, 0
-    y = 60
-    while y < 700 and drawn < cap:
-        x = 60
-        while x < 1240 and drawn < cap:
+    y = y0
+    while y < y1 and drawn < cap:
+        x = x0
+        while x < x1 and drawn < cap:
             d = slide.shapes.add_shape(MSO_SHAPE.OVAL, px(x), px(y), px(dot_px), px(dot_px))
             _solid(d, light)
             _no_line(d)
