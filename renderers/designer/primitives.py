@@ -608,7 +608,8 @@ def _fit_table_layout(headers, rows, col_w, total_h,
 
 
 def table_block(slide, headers, rows, rect_px, accent_col=None,
-                first_col_wider: bool = True, dark_bg: bool = False):
+                first_col_wider: bool = True, dark_bg: bool = False,
+                header_fill: str = "green"):
     """Native zebra table (template slide-56 style): transparent header row with
     SemiBold graphite text, body rows alternating gray/white, thin vertical
     separators. ``accent_col`` tints one column with a brand periwinkle (not
@@ -662,11 +663,18 @@ def table_block(slide, headers, rows, rect_px, accent_col=None,
     base_fill = GRAPHITE if dark_bg else GRAY
     accent_tint = NON_ACCENT[0]  # periwinkle blue (template s.52 highlighted col)
 
+    # Header row fill (template s.52 = uniform GREEN header with WHITE text).
+    HEADER_FILLS = {
+        "green": (GREEN, WHITE),
+        "graphite": (GRAPHITE, WHITE),
+        "none": (None, head_color),
+    }
+    hdr_bg, hdr_txt = HEADER_FILLS.get(header_fill, (GREEN, WHITE))
     for c in range(n_cols):
         cell = table.cell(0, c)
-        _tbl_cell_fill(cell, None)
+        _tbl_cell_fill(cell, hdr_bg)
         _tbl_cell_margins(cell)
-        _tbl_cell_text(cell, headers[c], body_pt, True, head_color)
+        _tbl_cell_text(cell, headers[c], body_pt, True, hdr_txt)
 
     for ri, row in enumerate(norm):
         zebra = base_fill if ri % 2 == 0 else None
