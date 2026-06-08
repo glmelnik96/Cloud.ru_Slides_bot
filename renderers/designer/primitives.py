@@ -307,6 +307,30 @@ def title_block(slide, text: str, rect_px, size_pt: int = 44,
     return tb
 
 
+def display_title(slide, text: str, rect_px, *, dark_bg: bool = False,
+                  color=None, max_pt: float = 96.0):
+    """Oversized cover/section heading: SemiBold, shrink-to-fit up to max_pt,
+    top-anchored so it fills the upper band. No accent underline (the cover's
+    green fill / portal carries the brand). ``color`` overrides the default."""
+    left, top, w, h = rect_px
+    if color is None:
+        color = WHITE if dark_bg else GRAPHITE
+    fit_pt, _, _ = _fit(text, w, h, base_pt=max_pt, min_pt=40.0,
+                        semibold=True, wrap=True, balance=True)
+    tb = slide.shapes.add_textbox(px(left), px(top), px(w), px(h))
+    tf = tb.text_frame
+    tf.word_wrap = True
+    _zero_margins(tf)
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+    p = tf.paragraphs[0]
+    r = p.add_run()
+    r.text = text
+    r.font.name = SEMIBOLD_FONT
+    r.font.size = Pt(fit_pt)
+    r.font.color.rgb = color
+    return tb
+
+
 def body_block(slide, bullets, rect_px, size_pt: int = 16, dark_bg: bool = False):
     """Body copy with native green-tick bullets, shrink-to-fit as a block."""
     left, top, w, h = rect_px
