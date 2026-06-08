@@ -131,6 +131,13 @@ def compose_node(state: SessionState) -> dict[str, Any]:
         num = int(cls.get("num") or (i + 1))
         archetype = archetype_for(cls, is_first=(i == 0))
         content = slide_content_for(cls, brief_by_num.get(num))
+        has_text = bool((content.get("title") or "").strip()) or any(
+            str(b).strip() for b in (content.get("body") or [])
+        )
+        has_native = any(content.get(k) for k in ("kpi", "chart", "table", "flow", "image"))
+        if not has_text and not has_native:
+            logger.info("node.compose.skip_phantom", session_id=state.session_id, num=num)
+            continue  # phantom/empty slide — do not fabricate
         comp = _compose_one(stub, content, archetype, num, use_critic=use_critic)
         if not comp.get("blocks") or all(b.get("role") == "title" for b in comp["blocks"]):
             fallbacks += 1

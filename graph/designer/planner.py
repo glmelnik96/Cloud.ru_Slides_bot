@@ -6,6 +6,7 @@ art direction is already locked; this is a pure routing function.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # Designer archetypes (see spec §5).
@@ -13,6 +14,43 @@ ARCHETYPES = (
     "cover", "data-chart", "kpi", "diagram-flow", "comparison", "table",
     "timeline", "team", "section-divider", "title-body",
 )
+
+# Source-brief page-reference citations — «(стр. 7)», «(стр. 12-14)», «(стр.7)»,
+# «(с. 5)» — are document-internal cross-refs, meaningless on a slide. Strip
+# them deterministically (mirrors main-repo commit 5280aa3). Conservative: only
+# the «стр.»/«с.» page-ref shape, never other parenthesised content.
+_PAGE_REF_PATTERN = re.compile(
+    r"\s*\(\s*(?:стр|с)\.?\s*\d+(?:\s*[,–—-]\s*\d+)*\s*\)",
+    flags=re.UNICODE | re.IGNORECASE,
+)
+
+
+def _strip_pageref(s: str) -> str:
+    """Remove parenthesised «(стр. N[-M])» page-ref fragments and tidy the
+    whitespace they leave behind. Returns the input unchanged when there are no
+    matches so well-formed strings aren't churned."""
+    if not s or not _PAGE_REF_PATTERN.search(s):
+        return s
+    cleaned = _PAGE_REF_PATTERN.sub("", s)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _strip_pageref_deep(value: Any) -> Any:
+    """Recursively strip page-refs from every string inside a nested structure
+    (dict / list / scalar). Native data blocks (kpi/chart/table/flow/image) are
+    copied verbatim from the classifier into the composer payload and rendered
+    text-is-sacred, so any page-ref in a cell/label/heading would leak onto the
+    slide. Mirrors the conservative, no-churn behaviour of ``_strip_pageref``:
+    only strings matching the «стр.»/«с.» shape change; everything else (numbers,
+    bools, keys, unmatched strings) is returned untouched."""
+    if isinstance(value, str):
+        return _strip_pageref(value)
+    if isinstance(value, dict):
+        return {k: _strip_pageref_deep(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_pageref_deep(v) for v in value]
+    return value
 
 
 def archetype_for(cls: dict[str, Any], is_first: bool) -> str:
@@ -60,9 +98,16 @@ def slide_content_for(cls: dict[str, Any], brief_slide: dict[str, Any] | None) -
     }
     for key in ("kpi", "chart", "table", "flow", "image"):
         if cls.get(key):
-            payload[key] = cls[key]
+            # Native blocks carry text-is-sacred cell/label/heading strings
+            # straight to the composer → strip page-refs from every nested str.
+            payload[key] = _strip_pageref_deep(cls[key])
     if brief_slide:
-        payload["title"] = brief_slide.get("raw_title") or ""
-        payload["body"] = brief_slide.get("raw_body") or []
-        payload["key_phrase"] = brief_slide.get("key_phrase", "")
+        payload["title"] = _strip_pageref(brief_slide.get("raw_title") or "")
+        body_items = brief_slide.get("raw_body") or []
+        payload["body"] = [
+            stripped
+            for b in body_items
+            if (stripped := _strip_pageref(str(b)).strip())
+        ]
+        payload["key_phrase"] = _strip_pageref(brief_slide.get("key_phrase", "") or "")
     return payload

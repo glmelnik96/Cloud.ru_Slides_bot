@@ -226,7 +226,10 @@ def title_block(slide, text: str, rect_px, size_pt: int = 44,
     tf = tb.text_frame
     tf.word_wrap = True
     _zero_margins(tf)
-    tf.vertical_anchor = MSO_ANCHOR.MIDDLE if centred else MSO_ANCHOR.TOP
+    # Multi-line titles use TOP anchor so they grow downward (never overflow
+    # upward and clip at the canvas top). Single-line titles may stay MIDDLE.
+    use_middle = centred and lines <= 1
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE if use_middle else MSO_ANCHOR.TOP
     p = tf.paragraphs[0]
     run = p.add_run()
     run.text = text
@@ -241,10 +244,10 @@ def title_block(slide, text: str, rect_px, size_pt: int = 44,
         line_h = fit_pt * PT_TO_PX * 1.2
         block_h = line_h * max(1, lines)
         bar_w = min(w, max(140.0, fit_pt * 3.6))
-        if centred:
-            bar_top = top + (h - block_h) / 2 + block_h + 6
+        if use_middle:
+            bar_top = top + (h - line_h) / 2 + line_h + 4
         else:
-            bar_top = top + block_h + 6
+            bar_top = top + block_h + 4
         bar_top = min(bar_top, top + h - 8)
         _accent_bar(slide, left, bar_top, bar_w, 6, color=GREEN)
     return tb
@@ -259,11 +262,15 @@ def body_block(slide, bullets, rect_px, size_pt: int = 16, dark_bg: bool = False
         return None
 
     # Fit the whole block: measure the longest bullet for width and the joined
-    # text for height (line count drives vertical fit).
+    # text for height (line count drives vertical fit). Reserve the cumulative
+    # inter-paragraph gap space so multi-bullet blocks don't overflow the box.
     joined = "\n".join(items)
-    fit_pt, _, _ = _fit(joined, w - 28, h, base_pt=float(size_pt), min_pt=11.0,
+    n = len(items)
+    gap_pt = max(4.0, float(size_pt) * 0.35)  # provisional gap estimate
+    h_text = max(1.0, h - gap_pt * (n - 1))
+    fit_pt, _, _ = _fit(joined, w - 28, h_text, base_pt=float(size_pt), min_pt=11.0,
                         semibold=False, wrap=True)
-    gap_pt = max(4.0, fit_pt * 0.35)
+    gap_pt = max(4.0, fit_pt * 0.35)  # final gap from fitted size
 
     tb = slide.shapes.add_textbox(px(left), px(top), px(w), px(h))
     tf = tb.text_frame
@@ -565,6 +572,11 @@ def table_block(slide, headers, rows, rect_px, accent_col=None,
         elif len(rr) > n_cols:
             rr = rr[:n_cols]
         norm.append(rr)
+    # Drop fully-empty rows (from merged source cells) — they render as blank
+    # zebra stripes. Bail out if nothing is left.
+    norm = [rr for rr in norm if any(str(c).strip() for c in rr)]
+    if not norm:
+        return None
     n_total = len(norm) + 1
 
     # Column widths (first label column 1.4x wider when asked).
@@ -779,7 +791,7 @@ def person_card(slide, heading: str, sub: str, rect_px, plate: bool = True,
     tf.word_wrap = True
     _zero_margins(tf)
     tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-    h_pt, _, _ = _fit(str(heading), w - 2 * pad, (h - 2 * pad) * 0.55,
+    h_pt, _, _ = _fit(str(heading), w - 2 * pad, (h - 2 * pad) * 0.52,
                       base_pt=18.0, min_pt=11.0, semibold=True, wrap=True)
     p = tf.paragraphs[0]
     r = p.add_run()
@@ -788,7 +800,7 @@ def person_card(slide, heading: str, sub: str, rect_px, plate: bool = True,
     r.font.size = Pt(h_pt)
     r.font.color.rgb = WHITE if dark_bg else GRAPHITE
     if sub:
-        s_pt, _, _ = _fit(str(sub), w - 2 * pad, (h - 2 * pad) * 0.4,
+        s_pt, _, _ = _fit(str(sub), w - 2 * pad, (h - 2 * pad) * 0.38,
                           base_pt=13.0, min_pt=9.0, semibold=False, wrap=True)
         p2 = tf.add_paragraph()
         p2.space_before = Pt(4)

@@ -8,6 +8,7 @@ Usage: python -m scripts.live_run_design [input.pptx]
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -97,6 +98,15 @@ def main() -> int:
         roles = [b.get("role") for b in blocks]
         print(f"  slide {c.get('slide_num')}: tone={c.get('tone')} "
               f"blocks={len(blocks)} roles={roles}", flush=True)
+
+    # Persist the raw Compositions (DSL) so the deck can be re-assembled later
+    # WITHOUT another paid LLM run — assembly is deterministic, so iterating on
+    # the native_assembler only needs scripts.reassemble_design on this dump.
+    if comps:
+        comp_path = Path("tmp/design_out") / f"{state.session_id}_comp.json"
+        comp_path.parent.mkdir(parents=True, exist_ok=True)
+        comp_path.write_text(json.dumps(comps, ensure_ascii=False), encoding="utf-8")
+        print(f"comp dump:      {comp_path}", flush=True)
 
     built = arts.get("result_path")
     if built:
