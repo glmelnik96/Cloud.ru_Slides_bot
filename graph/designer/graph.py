@@ -1,6 +1,6 @@
 """Standalone LangGraph for the /design from-scratch designer skill.
 
-    START → parse → brief → classify → art_director → compose → native_assemble → END
+    START → parse → brief → classify → art_director → compose → native_assemble → finalize → END
 
 parse/brief/classify are reused verbatim from the donor pipeline (read-only);
 the designer-specific nodes live in ``graph.designer.nodes``. Kept fully
@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from graph.designer.nodes import (
     art_director_node,
     compose_node,
+    finalize_node,
     native_assemble_node,
 )
 from graph.nodes.agents import brief_node, classify_node
@@ -29,6 +30,7 @@ N_CLASSIFY = "classify"
 N_ART = "art_director"
 N_COMPOSE = "compose"
 N_ASSEMBLE = "native_assemble"
+N_FINALIZE = "finalize"
 
 
 def build_designer_graph() -> StateGraph:
@@ -39,6 +41,7 @@ def build_designer_graph() -> StateGraph:
     g.add_node(N_ART, art_director_node)
     g.add_node(N_COMPOSE, compose_node)
     g.add_node(N_ASSEMBLE, native_assemble_node)
+    g.add_node(N_FINALIZE, finalize_node)
 
     g.add_edge(START, N_PARSE)
     g.add_edge(N_PARSE, N_BRIEF)
@@ -46,7 +49,8 @@ def build_designer_graph() -> StateGraph:
     g.add_edge(N_CLASSIFY, N_ART)
     g.add_edge(N_ART, N_COMPOSE)
     g.add_edge(N_COMPOSE, N_ASSEMBLE)
-    g.add_edge(N_ASSEMBLE, END)
+    g.add_edge(N_ASSEMBLE, N_FINALIZE)
+    g.add_edge(N_FINALIZE, END)
     return g
 
 

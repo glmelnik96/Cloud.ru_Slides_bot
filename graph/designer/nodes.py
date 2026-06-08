@@ -26,6 +26,9 @@ from schemas.session import SessionState, Stage
 from worker import progress
 from graph.designer.planner import archetype_for, layout_options, slide_content_for
 from graph.designer.vision_qa import vision_repair
+# Shared with the donor pipeline so the built .pptx lands in the per-session
+# workdir (honours SLIDESBOT_WORKDIR) the bot reads from for send_document.
+from graph.nodes.pipeline import _output_filename, _session_workdir
 
 logger = structlog.get_logger(__name__)
 
@@ -230,15 +233,41 @@ def compose_node(state: SessionState) -> dict[str, Any]:
 
 # ─── native_assemble (DSL → native .pptx) ────────────────────────────────────
 
-def native_assemble_node(state: SessionState, out_dir: str = "tmp/design_out") -> dict[str, Any]:
+def native_assemble_node(state: SessionState, out_dir: str | None = None) -> dict[str, Any]:
     _emit(state, Stage.RENDERING, pct=85, detail="сборка .pptx")
     arts = _artefacts(state)
     comps = [Composition(**c) for c in (arts.get("compositions") or [])]
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    out_path = str(Path(out_dir) / f"{state.session_id}_design.pptx")
+    # Default to the shared per-session workdir (honours SLIDESBOT_WORKDIR) so
+    # the bot container can read the file for send_document; an explicit out_dir
+    # (host validation scripts) overrides it.
+    if out_dir:
+        workdir = Path(out_dir)
+        workdir.mkdir(parents=True, exist_ok=True)
+    else:
+        workdir = _session_workdir(state.session_id)
+    out_path = str(workdir / _output_filename(state.session_id, state.source_filename))
     build_deck(comps, out_path)
     arts["result_path"] = out_path
     logger.info("node.native_assemble.done", session_id=state.session_id,
                 slides=len(comps), path=out_path)
     return {"artefacts": arts, "result_s3_key": out_path,
             "stage": Stage.FINALIZING.value, "progress_pct": 95}
+
+
+# ─── finalize (terminal) ─────────────────────────────────────────────────────
+
+def finalize_node(state: SessionState) -> dict[str, Any]:
+    """Publish the terminal DONE event with the built .pptx path.
+
+    Mirrors the donor pipeline's finalize: this is the ONLY place the designer
+    graph emits a terminal progress event, which the bot's subscriber needs to
+    deliver the result and release the global queue lock. Without it a /design
+    job would stall the shared queue (the bot waits forever for a terminal).
+    """
+    arts = _artefacts(state)
+    result_path = arts.get("result_path") or state.result_s3_key
+    progress.done(state.session_id, detail="готово", result_path=result_path)
+    logger.info("node.designer_finalize.done", session_id=state.session_id,
+                has_result=bool(result_path))
+    return {"stage": Stage.DONE.value, "progress_pct": 100,
+            "notes": [*state.notes, "Готово"]}

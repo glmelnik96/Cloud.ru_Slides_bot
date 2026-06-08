@@ -27,6 +27,10 @@ COPY llm ./llm
 COPY schemas ./schemas
 COPY storage ./storage
 COPY renderers ./renderers
+# Top-level scripts/ holds the designer vision-QA render harness
+# (scripts.render_png, imported by graph/designer/vision_qa.py). Without it the
+# per-slide pixel-judge silently degrades to a no-op in the container.
+COPY scripts ./scripts
 # Vendored slide-build skill (scripts + brand + dictionaries + .pptx donor
 # template). Required by skill_bridge.install() — worker fails fast without it.
 COPY skill_assets ./skill_assets
