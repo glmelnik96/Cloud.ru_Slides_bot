@@ -25,6 +25,7 @@ from schemas.design import CriticVerdict, DesignStub
 from schemas.session import SessionState, Stage
 from worker import progress
 from graph.designer.planner import archetype_for, layout_options, slide_content_for
+from graph.designer.vision_qa import vision_repair
 
 logger = structlog.get_logger(__name__)
 
@@ -195,6 +196,7 @@ def compose_node(state: SessionState) -> dict[str, Any]:
     brief_by_num = {int(s.get("num", 0)): s for s in (brief.get("slides") or [])}
 
     use_critic = bool(arts.get("designer_use_critic", True))
+    use_vision_qa = bool(arts.get("designer_vision_qa", True))
     comps: list[dict[str, Any]] = []
     fallbacks = 0
     for i, cls in enumerate(cls_slides):
@@ -215,6 +217,9 @@ def compose_node(state: SessionState) -> dict[str, Any]:
             comp = _compose_one(stub, content, archetype, num, use_critic=use_critic)
             if not comp.get("blocks") or all(b.get("role") == "title" for b in comp["blocks"]):
                 fallbacks += 1
+        if use_vision_qa:
+            comp = vision_repair(comp, stub, content, archetype, layouts, num,
+                                 _skeleton_fallback)
         comps.append(comp)
 
     arts["compositions"] = comps

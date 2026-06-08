@@ -64,3 +64,15 @@ class CriticVerdict(BaseModel):
     model_config = ConfigDict(extra="forbid")
     verdict: Literal["READY", "NOT-READY"] = "READY"
     reasons: list[str] = Field(default_factory=list)
+
+
+class PixelVerdict(BaseModel):
+    """pixel_judge output: a VISION verdict on ONE rendered slide PNG.
+
+    ``ok`` is a holistic "looks correct" gate; ``issues`` lists concrete visual
+    defects (text overflow/clipping, empty/sparse slide, overlap, off-canvas,
+    illegible contrast) phrased as fixable instructions for the composer.
+    """
+    model_config = ConfigDict(extra="forbid")
+    ok: bool = True
+    issues: list[str] = Field(default_factory=list)
