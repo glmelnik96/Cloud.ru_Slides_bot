@@ -9,6 +9,7 @@ from __future__ import annotations
 from pptx import Presentation
 from pptx.util import Emu
 
+from renderers.designer import layouts as L
 from renderers.designer import primitives as P
 from renderers.designer.composition_dsl import (
     Composition,
@@ -16,6 +17,22 @@ from renderers.designer.composition_dsl import (
     GRID_ROWS,
     Grid,
 )
+
+# Archetype name -> skeleton fn. When a Composition carries a known ``layout``
+# the skeleton owns the whole slide and the free-grid path is bypassed.
+_LAYOUTS = {
+    "cover_green": L.cover_green,
+    "cover_dark": L.cover_dark,
+    "section_divider": L.section_divider,
+    "points_3": L.points_3,
+    "points_4": L.points_4,
+    "points_6": L.points_6,
+    "points_8": L.points_8,
+    "bullet_list": L.bullet_list,
+    "table_zebra": L.table_zebra,
+    "chart_columns": L.chart_columns,
+    "roadmap_timeline": L.roadmap_timeline,
+}
 
 CANVAS_W, CANVAS_H = 1280, 720
 MARGIN = 40  # safe-area margin in px (brandbook micro-module multiple)
@@ -317,6 +334,12 @@ def assemble_slide(prs: Presentation, comp: Composition) -> None:
     blank = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
     slide = prs.slides.add_slide(blank)
     dark = comp.tone == "dark" or comp.background.kind == "graphite"
+
+    # Skeleton mode: a known archetype owns its full layout. The skeleton paints
+    # its own background/chrome, so return before the free-grid path runs.
+    if comp.layout and comp.layout in _LAYOUTS:
+        _LAYOUTS[comp.layout](slide, comp.content or {}, dark=dark)
+        return
 
     P.background(slide, comp.background.kind)
 

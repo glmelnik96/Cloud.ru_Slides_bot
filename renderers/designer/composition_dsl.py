@@ -10,7 +10,7 @@ path renders a clean, on-brand, structurally-valid slide deterministically.
 """
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -153,9 +153,20 @@ class Background(BaseModel):
 
 
 class Composition(BaseModel):
-    """One designed slide."""
+    """One designed slide.
+
+    Two rendering modes:
+      * Skeleton mode (preferred) — set ``layout`` to an archetype name and
+        ``content`` to its content dict; the assembler dispatches to
+        ``renderers.designer.layouts`` which owns the whole slide. ``blocks``
+        is then ignored.
+      * Free mode (legacy) — leave ``layout`` None and place ``blocks`` on the
+        12x10 grid; the assembler de-overlaps/clamps/reflows them.
+    """
     model_config = ConfigDict(extra="forbid")
     slide_num: int
     tone: Literal["light", "dark", "green"] = "light"
     background: Background = Field(default_factory=Background)
+    layout: str | None = None
+    content: dict[str, Any] = Field(default_factory=dict)
     blocks: list[Block] = Field(default_factory=list)
