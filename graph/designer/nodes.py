@@ -15,6 +15,7 @@ from llm.output_parsers import call_and_parse
 from llm.prompts.designer import (
     art_director,
     brand_critic_v2,
+    skeleton_composer,
     slide_composer,
 )
 from llm.roles import Role
@@ -23,7 +24,7 @@ from renderers.designer.native_assembler import build_deck
 from schemas.design import CriticVerdict, DesignStub
 from schemas.session import SessionState, Stage
 from worker import progress
-from graph.designer.planner import archetype_for, slide_content_for
+from graph.designer.planner import archetype_for, layout_options, slide_content_for
 
 logger = structlog.get_logger(__name__)
 
@@ -78,6 +79,75 @@ def _fallback_title_body(content: dict[str, Any], num: int, dark: bool) -> dict[
         "background": {"kind": "graphite" if dark else "white"},
         "blocks": blocks,
     }
+
+
+def _skeleton_fallback(layouts: list[str], content: dict[str, Any], num: int,
+                       dark: bool) -> dict[str, Any]:
+    """Deterministic skeleton Composition when the LLM skeleton-compose fails.
+
+    Picks the safest candidate layout and fills its content dict straight from
+    the planner content (native data verbatim), so a slide always renders
+    on-brand even without a live model response.
+    """
+    title = content.get("title") or ""
+    body = [str(b) for b in (content.get("body") or []) if str(b).strip()]
+    layout = layouts[0]
+    if layout.startswith("cover"):
+        c: dict[str, Any] = {"title": title}
+        if body:
+            c["subtitle"] = body[0]
+    elif layout == "section_divider":
+        c = {"title": title}
+    elif layout == "table_zebra":
+        tbl = content.get("table") or {}
+        c = {"title": title or tbl.get("header") or "",
+             "headers": tbl.get("headers") or [],
+             "rows": tbl.get("data") or tbl.get("rows") or []}
+    elif layout == "chart_columns":
+        ch = content.get("chart") or {}
+        series = ch.get("series") or []
+        c = {"title": title or ch.get("title") or "",
+             "categories": ch.get("x") or ch.get("categories") or [],
+             "series": [{"name": s.get("name", ""), "values": s.get("values", [])}
+                        for s in series],
+             "accent_idx": int(ch.get("accent_idx", 0) or 0)}
+    elif layout == "roadmap_timeline":
+        c = {"title": title,
+             "milestones": [{"label": str(i + 1), "text": b}
+                            for i, b in enumerate(body[:6])]}
+    else:  # bullet_list / points_* → bullet_list is the universally-safe shape
+        layout = "bullet_list"
+        c = {"title": title, "bullets": body[:8]}
+    tone = "green" if layout == "cover_green" else ("dark" if dark else "light")
+    bg = "green" if layout == "cover_green" else ("graphite" if dark else "white")
+    return {"slide_num": num, "tone": tone, "background": {"kind": bg},
+            "layout": layout, "content": c}
+
+
+def _compose_skeleton(stub: dict[str, Any], content: dict[str, Any], archetype: str,
+                      layouts: list[str], num: int) -> dict[str, Any]:
+    """Skeleton-mode compose: LLM picks a layout + fills its content dict.
+
+    No brand critic — the skeleton guarantees the on-brand layout; visual QA
+    (Phase 4) replaces the grid-overlap critic that only made sense for free
+    placement. Falls back to a deterministic skeleton on parse failure.
+    """
+    msgs = skeleton_composer.build_messages(stub, content, archetype, layouts)
+    try:
+        comp, _ = call_and_parse(
+            role=Role.SLIDE_COMPOSER, messages=msgs, model_cls=Composition,
+        )
+    except Exception as exc:
+        logger.warning("node.compose.skeleton_parse_fail", num=num, err=str(exc))
+        return _skeleton_fallback(layouts, content, num, bool(content.get("dark")))
+    comp_dump = comp.model_dump()
+    comp_dump["slide_num"] = num
+    # Guard: model must return a known candidate layout with non-empty content.
+    if comp_dump.get("layout") not in layouts or not comp_dump.get("content"):
+        logger.info("node.compose.skeleton_off_menu", num=num,
+                    got=comp_dump.get("layout"), allowed=layouts)
+        return _skeleton_fallback(layouts, content, num, bool(content.get("dark")))
+    return comp_dump
 
 
 def _compose_one(stub: dict[str, Any], content: dict[str, Any], archetype: str,
@@ -138,9 +208,13 @@ def compose_node(state: SessionState) -> dict[str, Any]:
         if not has_text and not has_native:
             logger.info("node.compose.skip_phantom", session_id=state.session_id, num=num)
             continue  # phantom/empty slide — do not fabricate
-        comp = _compose_one(stub, content, archetype, num, use_critic=use_critic)
-        if not comp.get("blocks") or all(b.get("role") == "title" for b in comp["blocks"]):
-            fallbacks += 1
+        layouts = layout_options(archetype, content)
+        if layouts:
+            comp = _compose_skeleton(stub, content, archetype, layouts, num)
+        else:
+            comp = _compose_one(stub, content, archetype, num, use_critic=use_critic)
+            if not comp.get("blocks") or all(b.get("role") == "title" for b in comp["blocks"]):
+                fallbacks += 1
         comps.append(comp)
 
     arts["compositions"] = comps

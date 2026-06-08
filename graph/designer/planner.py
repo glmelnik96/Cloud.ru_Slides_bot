@@ -53,6 +53,31 @@ def _strip_pageref_deep(value: Any) -> Any:
     return value
 
 
+# Archetype → candidate skeleton layout(s). When an archetype maps to one or
+# more skeletons the composer picks among them and fills the skeleton's content
+# dict (the skeleton owns layout — see renderers.designer.layouts). Archetypes
+# absent here have no skeleton and fall back to the free-grid block composer.
+_LAYOUT_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "section-divider": ("section_divider",),
+    "title-body": ("bullet_list", "points_3", "points_4", "points_6", "points_8"),
+    "data-chart": ("chart_columns",),
+    "table": ("table_zebra",),
+    "timeline": ("roadmap_timeline",),
+}
+
+
+def layout_options(archetype: str, content: dict[str, Any]) -> list[str]:
+    """Candidate skeleton layouts for an archetype, or [] for free-grid mode.
+
+    ``cover`` resolves to a single tone-appropriate cover skeleton; everything
+    else reads from ``_LAYOUT_CANDIDATES``. The composer chooses one candidate
+    and fills its content dict.
+    """
+    if archetype == "cover":
+        return ["cover_dark"] if content.get("dark") else ["cover_green"]
+    return list(_LAYOUT_CANDIDATES.get(archetype, ()))
+
+
 def archetype_for(cls: dict[str, Any], is_first: bool) -> str:
     """Pick an archetype for one classified slide."""
     slide_type = cls.get("slide_type")
