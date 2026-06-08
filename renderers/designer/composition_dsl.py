@@ -62,7 +62,7 @@ class ChartSeries(BaseModel):
 class ChartBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal["chart"] = "chart"
-    chart_type: Literal["bar", "pie", "line", "area_100"] = "bar"
+    chart_type: Literal["bar", "hbar", "pie", "line", "area", "area_100"] = "bar"
     categories: list[str]
     series: list[ChartSeries]
     grid: Grid
@@ -72,6 +72,24 @@ class ChartBlock(BaseModel):
     # "estimated" → values were OCR'd/read off a raster chart; render a
     #               "оценка по графику" footnote so a report never lies.
     data_provenance: Literal["native", "estimated"] = "native"
+
+
+class TableBlock(BaseModel):
+    """A native (Excel-/PowerPoint-editable) zebra table.
+
+    Mirrors the template's slide-56 zebra style: white header row with SemiBold
+    graphite text, body rows alternating gray/white, thin vertical separators.
+    One column MAY be tinted (``accent_col``) to highlight it — a brand TINT,
+    not green (matches the template's single blue column on slide 52). The green
+    one-accent rule does not apply to data tables.
+    """
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["table"] = "table"
+    headers: list[str]
+    rows: list[list[str]]
+    grid: Grid
+    first_col_wider: bool = True        # widen the first (label) column 1.4x
+    accent_col: int | None = None       # index of the ONE tinted column, if any
 
 
 class NodeBlock(BaseModel):
@@ -124,7 +142,7 @@ class DecorBlock(BaseModel):
 
 
 Block = Union[
-    TitleBlock, BodyBlock, KpiBlock, ChartBlock,
+    TitleBlock, BodyBlock, KpiBlock, ChartBlock, TableBlock,
     NodeBlock, ConnectorBlock, CardBlock, MilestoneBlock, DecorBlock,
 ]
 

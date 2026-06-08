@@ -19,6 +19,9 @@ from renderers.designer.composition_dsl import (
 
 CANVAS_W, CANVAS_H = 1280, 720
 MARGIN = 40  # safe-area margin in px (brandbook micro-module multiple)
+# Brand safe-area bottom is 660px; reserve a larger bottom margin so a block in
+# the last grid row (r=10) never bleeds past it (was ending at 680px).
+MARGIN_BOTTOM = 60
 
 
 def _snap2(v: float) -> float:
@@ -29,7 +32,7 @@ def _snap2(v: float) -> float:
 def _grid_to_px(g: Grid):
     """Convert a grid span to a px rect inside the safe area (2px-snapped)."""
     usable_w = CANVAS_W - 2 * MARGIN
-    usable_h = CANVAS_H - 2 * MARGIN
+    usable_h = CANVAS_H - MARGIN - MARGIN_BOTTOM
     cell_w = usable_w / GRID_COLS
     cell_h = usable_h / GRID_ROWS
     left = MARGIN + (g.c - 1) * cell_w
@@ -37,6 +40,24 @@ def _grid_to_px(g: Grid):
     w = g.cs * cell_w
     h = g.rs * cell_h
     return (_snap2(left), _snap2(top), _snap2(w), _snap2(h))
+
+
+def _edge_point(rect, toward):
+    """Point on ``rect``'s border along the line from its center to ``toward``.
+
+    Keeps connector endpoints on the node boundary so arrows touch the boxes
+    instead of cutting through their centers.
+    """
+    left, top, w, h = rect
+    cx, cy = left + w / 2, top + h / 2
+    dx, dy = toward[0] - cx, toward[1] - cy
+    if dx == 0 and dy == 0:
+        return (cx, cy)
+    hw, hh = w / 2, h / 2
+    sx = hw / abs(dx) if dx else float("inf")
+    sy = hh / abs(dy) if dy else float("inf")
+    s = min(sx, sy)
+    return (cx + dx * s, cy + dy * s)
 
 
 def _portal_base(anchor: str, side: float = 200.0):
@@ -63,12 +84,12 @@ def assemble_slide(prs: Presentation, comp: Composition) -> None:
 
     P.background(slide, comp.background.kind)
 
-    # First pass: resolve node center points so connectors can route by index.
-    node_centers: list[tuple[float, float]] = []
+    # First pass: resolve node rects so connectors can route edge-to-edge.
+    node_rects: list[tuple[float, float, float, float]] = []
     for blk in comp.blocks:
         if blk.role == "node":
-            left, top, w, h = _grid_to_px(blk.grid)
-            node_centers.append((left + w / 2, top + h / 2))
+            node_rects.append(_grid_to_px(blk.grid))
+    node_centers = [(l + w / 2, t + h / 2) for (l, t, w, h) in node_rects]
 
     for blk in comp.blocks:
         role = blk.role
@@ -78,12 +99,14 @@ def assemble_slide(prs: Presentation, comp: Composition) -> None:
             elif blk.kind == "outline_corner":
                 P.outline_corner(slide, blk.anchor, dark_bg=dark)
             elif blk.kind == "portal":
-                P.portal(slide, _portal_base(blk.anchor), n=blk.portal_squares)
+                P.portal(slide, _portal_base(blk.anchor), n=blk.portal_squares,
+                         dark_bg=dark)
             continue
         if role == "connector":
             if 0 <= blk.src < len(node_centers) and 0 <= blk.dst < len(node_centers):
-                P.arrow(slide, node_centers[blk.src], node_centers[blk.dst],
-                        rhombus=blk.rhombus, dark_bg=dark)
+                p0 = _edge_point(node_rects[blk.src], node_centers[blk.dst])
+                p1 = _edge_point(node_rects[blk.dst], node_centers[blk.src])
+                P.arrow(slide, p0, p1, rhombus=blk.rhombus, dark_bg=dark)
             continue
         rect = _grid_to_px(blk.grid)
         if role == "title":
@@ -97,7 +120,13 @@ def assemble_slide(prs: Presentation, comp: Composition) -> None:
             P.chart_block(
                 slide, blk.chart_type, blk.categories,
                 [s.model_dump() for s in blk.series], rect, accent_idx=blk.accent_idx,
-                data_provenance=blk.data_provenance,
+                data_provenance=blk.data_provenance, dark_bg=dark,
+            )
+        elif role == "table":
+            P.table_block(
+                slide, blk.headers, blk.rows, rect,
+                accent_col=blk.accent_col, first_col_wider=blk.first_col_wider,
+                dark_bg=dark,
             )
         elif role == "node":
             P.node_box(slide, blk.text, rect, accent=blk.accent, dark_bg=dark)

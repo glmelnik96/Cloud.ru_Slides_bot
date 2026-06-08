@@ -10,7 +10,7 @@ from typing import Any
 
 # Designer archetypes (see spec §5).
 ARCHETYPES = (
-    "cover", "data-chart", "kpi", "diagram-flow", "comparison",
+    "cover", "data-chart", "kpi", "diagram-flow", "comparison", "table",
     "timeline", "team", "section-divider", "title-body",
 )
 
@@ -27,7 +27,7 @@ def archetype_for(cls: dict[str, Any], is_first: bool) -> str:
     if slide_type == "flow_diagram_native":
         return "diagram-flow"
     if slide_type == "table_native":
-        return "comparison"
+        return "table"
 
     if is_first or category == "title":
         return "cover" if is_first else "section-divider"

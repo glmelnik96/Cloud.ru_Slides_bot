@@ -13,7 +13,7 @@ from llm.prompts._shared import JSON_ONLY_FOOTER
 from renderers.designer.composition_dsl import GRID_COLS, GRID_ROWS
 
 _ARCHETYPES = (
-    "cover, data-chart, kpi, diagram-flow, comparison, timeline, team, "
+    "cover, data-chart, kpi, diagram-flow, comparison, table, timeline, team, "
     "section-divider, title-body"
 )
 
@@ -41,7 +41,8 @@ Block — один из (поле role обязательно):
 - {{"role":"title","text":"...","grid":{{"c":1,"r":1,"cs":8,"rs":2}},"size_pt":44,"accent_underline":true}}
 - {{"role":"body","bullets":["...","..."],"grid":{{...}},"size_pt":16}}
 - {{"role":"kpi","num":"+47%","desc":"...","grid":{{...}}}}
-- {{"role":"chart","chart_type":"bar|pie|line|area_100","categories":["..."],"series":[{{"name":"...","values":[1,2]}}],"grid":{{...}},"accent_idx":0,"data_provenance":"native|estimated"}}
+- {{"role":"chart","chart_type":"bar|hbar|pie|line|area|area_100","categories":["..."],"series":[{{"name":"...","values":[1,2]}}],"grid":{{...}},"accent_idx":0,"data_provenance":"native|estimated"}}
+- {{"role":"table","headers":["Категория","Кол.1","Кол.2"],"rows":[["…","…","…"],["…","…","…"]],"grid":{{...}},"first_col_wider":true,"accent_col":null}}
 - {{"role":"node","text":"...","grid":{{...}},"accent":false}}              // диаграмма
 - {{"role":"connector","src":0,"dst":1,"rhombus":false}}                   // стрелка между node по индексу
 - {{"role":"card","heading":"...","sub":"...","grid":{{...}},"plate":true,"accent":false}}  // команда/сравнение
@@ -65,6 +66,18 @@ Block — один из (поле role обязательно):
 - connector.src/dst — индексы node-блоков в порядке их появления в blocks (с 0).
 - data_provenance="estimated" ставь ТОЛЬКО если числа графика сняты с растровой
   картинки (тогда покажется подпись «оценка по графику»); для реальных данных — "native".
+- ВЫБОР chart_type: bar = вертикальные столбцы (динамика по категориям/годам);
+  hbar = горизонтальные полосы (рейтинг/сравнение длинных подписей); line =
+  тренд во времени; pie = доли одного целого (≤6 секторов); area = накопление
+  нескольких рядов; area_100 = доля рядов в 100%. Диаграммы и таблицы — это
+  data-viz: в них РАЗРЕШЕНО несколько брендовых цветов (зелёный-лид + светлые
+  тинты), правило «один зелёный акцент» к рядам графика/колонкам таблицы НЕ
+  относится — рендерер красит их сам, ты только задаёшь accent_idx (ведущий ряд)
+  и, по желанию, accent_col (одна выделенная колонка таблицы, НЕ зелёная).
+- АРХЕТИП table: один блок role=table с headers (шапка) и rows (строки, каждая
+  той же длины, что headers). Переноси значения ДОСЛОВНО. Не делай таблицу из
+  плашек/нод — только role=table. Если в источнике объединённые ячейки или
+  нерегулярная сетка — упрости до прямоугольной таблицы без искажения данных.
 - Тёмный фон (graphite) — только если это разрешено тональностью stub и бюджетом
   dark_ratio (обычно обложка/раздел).
 
