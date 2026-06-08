@@ -16,6 +16,7 @@ class Mode(str, Enum):
     VERSTAI = "verstai"
     AUDIT = "audit"
     BRIEF = "brief"
+    DESIGN = "design"  # /design — from-scratch native-vector designer skill
 
 
 class Stage(str, Enum):
@@ -66,7 +67,7 @@ class SessionState(BaseModel):
     user_id: int
     chat_id: int
     progress_message_id: int
-    mode: Literal["verstai", "audit", "brief"]
+    mode: Literal["verstai", "audit", "brief", "design"]
     created_at_iso: str
 
     # Pipeline

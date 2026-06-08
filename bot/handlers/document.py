@@ -13,13 +13,14 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.handlers.placeholders import audit, brief
-from bot.handlers.verstai import verstai
+from bot.handlers.verstai import design, verstai
 from bot.middleware.whitelist import guarded
 
 logger = structlog.get_logger(__name__)
 
 _DISPATCH = {
     "verstai": verstai,
+    "design": design,
     "audit": audit,
     "brief": brief,
 }

@@ -9,9 +9,11 @@ from telegram.ext import ContextTypes
 from bot.i18n.ru import (
     MODE_BUTTON_AUDIT,
     MODE_BUTTON_BRIEF,
+    MODE_BUTTON_DESIGN,
     MODE_BUTTON_VERSTAI,
     MODE_HOW_TO_AUDIT,
     MODE_HOW_TO_BRIEF,
+    MODE_HOW_TO_DESIGN,
     MODE_HOW_TO_VERSTAI,
     START_WELCOME,
 )
@@ -24,6 +26,7 @@ def _mode_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(MODE_BUTTON_VERSTAI, callback_data="mode:verstai")],
+            [InlineKeyboardButton(MODE_BUTTON_DESIGN, callback_data="mode:design")],
             [InlineKeyboardButton(MODE_BUTTON_AUDIT, callback_data="mode:audit")],
             [InlineKeyboardButton(MODE_BUTTON_BRIEF, callback_data="mode:brief")],
         ]
@@ -43,6 +46,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 _MODE_HOWTOS = {
     "mode:verstai": MODE_HOW_TO_VERSTAI,
+    "mode:design": MODE_HOW_TO_DESIGN,
     "mode:audit": MODE_HOW_TO_AUDIT,
     "mode:brief": MODE_HOW_TO_BRIEF,
 }
