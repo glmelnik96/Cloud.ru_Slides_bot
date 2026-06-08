@@ -208,6 +208,60 @@ def _accent_bar(slide, left, top, w, h, color=GREEN):
     return bar
 
 
+def divider_line(slide, left, top, w, *, color=GREEN, thick: int = 4):
+    """Green horizontal keyline above a bold sub-head + text item.
+
+    Core "N points" brand motif (template p.36): a FULL-WIDTH green rule sits
+    directly above each point's heading. Square caps, no effects.
+    """
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, px(left), px(top), px(w), px(thick))
+    _solid(bar, color)
+    _no_line(bar)
+    return bar
+
+
+def point_item(slide, heading: str, text: str, rect_px, *, dark_bg: bool = False):
+    """One "point": full-width green divider rule, bold sub-head, body text
+    beneath it (template p.36 module). Lays out inside rect_px with the divider
+    spanning the cell width on top."""
+    left, top, w, h = rect_px
+    divider_line(slide, left, top, w)
+    color = WHITE if dark_bg else GRAPHITE
+    # Module stacks tightly from the top: divider, then heading sized to its own
+    # line(s), then body directly beneath (template p.36 rhythm).
+    head_cap = min(h * 0.5, 80.0)
+    h_pt, _, head_lines = _fit(str(heading), w, head_cap, base_pt=20.0, min_pt=13.0,
+                               semibold=True, wrap=True)
+    head_h = h_pt * PT_TO_PX * 1.25 * max(1, head_lines)
+    hb = slide.shapes.add_textbox(px(left), px(top + 14), px(w), px(head_h))
+    htf = hb.text_frame
+    htf.word_wrap = True
+    _zero_margins(htf)
+    hp = htf.paragraphs[0]
+    hr = hp.add_run()
+    hr.text = heading
+    hr.font.name = SEMIBOLD_FONT
+    hr.font.size = Pt(h_pt)
+    hr.font.color.rgb = color
+    text = str(text).strip()
+    if text:
+        body_top = top + 14 + head_h + 8
+        body_h = h - (body_top - top)
+        b_pt, _, _ = _fit(text, w, body_h, base_pt=15.0, min_pt=10.0,
+                          semibold=False, wrap=True)
+        bb = slide.shapes.add_textbox(px(left), px(body_top), px(w), px(body_h))
+        btf = bb.text_frame
+        btf.word_wrap = True
+        _zero_margins(btf)
+        bp = btf.paragraphs[0]
+        br = bp.add_run()
+        br.text = text
+        br.font.name = PRIMARY_FONT
+        br.font.size = Pt(b_pt)
+        br.font.color.rgb = TEXT_GRAY if not dark_bg else WHITE
+    return hb
+
+
 # ─── Text ────────────────────────────────────────────────────────────────────
 
 def title_block(slide, text: str, rect_px, size_pt: int = 44,
