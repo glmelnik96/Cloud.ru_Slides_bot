@@ -1223,6 +1223,43 @@ def _strip_unsupported_glyphs(text: str) -> str:
     return cleaned.strip()
 
 
+# Source-brief page-reference citations ("(стр. 3)", "(стр. 5, 10)",
+# "(стр.7)", "(стр 12)", "(стр. 5-10)") leak through copyediting into card
+# bodies (deck3/Горбачевский s14). They are document-internal cross-references,
+# meaningless on a slide. Strip them deterministically, like the emoji pass.
+_PAGE_REF_PATTERN = re.compile(
+    r"\s*\(\s*стр\.?\s*\d+(?:\s*[,–—-]\s*\d+)*\s*\)",
+    flags=re.UNICODE | re.IGNORECASE,
+)
+
+
+def _strip_page_refs(text: str) -> str:
+    """Remove parenthesised "(стр. N[, M…])" page-ref citations and tidy the
+    whitespace they leave behind. Returns the input unchanged when there are no
+    matches so well-formed strings aren't churned."""
+    if not text or not _PAGE_REF_PATTERN.search(text):
+        return text
+    cleaned = _PAGE_REF_PATTERN.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _strip_page_refs_from_content(content_dump: dict[str, Any]) -> int:
+    """Apply ``_strip_page_refs`` to every placeholder content in a
+    DeckContentAssignment dump. Returns the number of fields that changed.
+    Mutates the dict in place."""
+    changed = 0
+    for slide in content_dump.get("slides") or []:
+        for ph in slide.get("placeholder_assignments") or []:
+            orig = ph.get("content")
+            if isinstance(orig, str):
+                new = _strip_page_refs(orig)
+                if new != orig:
+                    ph["content"] = new
+                    changed += 1
+    return changed
+
+
 def _strip_emoji_from_content(content_dump: dict[str, Any]) -> int:
     """Apply ``_strip_unsupported_glyphs`` to every placeholder content in a
     DeckContentAssignment dump. Returns the number of fields that changed.
@@ -1251,11 +1288,13 @@ def copyedit_node(state: SessionState) -> dict[str, Any]:
     )
     edited_dump = edited.model_dump()
     emoji_stripped = _strip_emoji_from_content(edited_dump)
+    page_refs_stripped = _strip_page_refs_from_content(edited_dump)
     arts["copy_edited"] = edited_dump
     total_edits = sum(s.edits_count for s in edited.slides)
     logger.info("node.copyedit.done", session_id=state.session_id,
                 slides=len(edited.slides), edits=total_edits,
-                emoji_stripped=emoji_stripped)
+                emoji_stripped=emoji_stripped,
+                page_refs_stripped=page_refs_stripped)
     return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 75}
 
 
@@ -1467,6 +1506,7 @@ def autofix_node(state: SessionState) -> dict[str, Any]:
     )
     edited_dump = edited.model_dump()
     emoji_stripped = _strip_emoji_from_content(edited_dump)
+    _strip_page_refs_from_content(edited_dump)
     arts["copy_edited"] = edited_dump
 
     logger.info(

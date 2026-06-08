@@ -333,7 +333,25 @@ def _sanitize_native_block(slide_type: str, key: str, block: Any) -> Any:
         # Preset archetypes own their layout — flow_renderer dispatches to the
         # preset function and returns before the grid/blocks path. Forcing
         # grid=true here would be a no-op at best, so leave preset blocks alone.
-        if (block.get("preset") or "").strip():
+        preset = (block.get("preset") or "").strip()
+        if preset:
+            # FIX8: card_grid degenerate-card cleanup. A fragmentary
+            # heading-heavy source slide (deck2/Памятки s4) yields cards with
+            # no meaningful content — an orphan "!" card from a stray raw_body
+            # line, blank cards. They render as garbage. Drop any card whose
+            # combined title+text has no alphanumeric character; real cards
+            # (incl. number-only ones like the "112" emergency line) survive.
+            if preset == "card_grid" and isinstance(block.get("cards"), list):
+                cleaned = [
+                    c for c in block["cards"]
+                    if isinstance(c, dict) and any(
+                        ch.isalnum()
+                        for ch in f"{c.get('title') or ''}{c.get('text') or ''}"
+                    )
+                ]
+                if cleaned != block["cards"]:
+                    block = dict(block)
+                    block["cards"] = cleaned
             return block
         blocks = block.get("blocks") or []
         if not block.get("grid"):
@@ -607,6 +625,30 @@ def _is_dangling_fragment(text: str) -> bool:
     return s.endswith(_DANGLING_TAIL_CHARS)
 
 
+def _is_shouting_banner(text: str) -> bool:
+    """True when ``text`` is a multi-word ALL-CAPS slogan/banner — a repeated
+    source-document header/heading, never a standalone body bullet (FIX7,
+    deck2/Памятки s2 «ПО СИГНАЛУ «ВНИМАНИЕ ВСЕМ! ВОЗДУШНАЯ ТРЕВОГА!»»).
+
+    Unlike the dangling-fragment gate, such a banner looks "complete" (it ends
+    in «!»», not a trailing connector), so it slips past _is_dangling_fragment
+    and — being uncovered against the body and absent from THIS slide's own
+    non-body slots (it belongs to the cover) — leaks into the last column.
+
+    Heuristic (conservative, to MISS rather than over-fire): ≥80% of the
+    alphabetic characters are uppercase AND there are ≥2 long (≥6-char) words —
+    the length floor keeps acronym lists (API/SDK/REST) and normal mixed-case
+    bullets from tripping it.
+    """
+    s = (text or "").strip()
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) < 12:
+        return False
+    if sum(1 for c in letters if c.isupper()) / len(letters) < 0.8:
+        return False
+    return sum(1 for w in _WORD_RE.findall(s) if len(w) >= 6) >= 2
+
+
 def _body_lines(text: str) -> list[str]:
     """Split a body string into non-empty logical lines (\n or \v separated)."""
     if not text:
@@ -761,6 +803,13 @@ def _recover_dropped_body_lines(
         # comma/colon/dash, no sentence terminator) is a foreign-slide title
         # split mid-line — never a standalone body bullet (deck3 s2 bleed).
         if _is_dangling_fragment(bl):
+            continue
+        # Shouting-banner gate (FIX7): a multi-word ALL-CAPS slogan/banner is a
+        # repeated source-document heading (deck2 s2 «ПО СИГНАЛУ «ВНИМАНИЕ ВСЕМ!
+        # ВОЗДУШНАЯ ТРЕВОГА!»»), not a body bullet — it ends in «!»» so the
+        # dangling-fragment gate misses it, and it lives on the cover so this
+        # slide's own non-body gate misses it too.
+        if _is_shouting_banner(bl):
             continue
         bwords = _sig_words(bl)
         # Non-body coverage gate (Task A): drop a candidate already represented

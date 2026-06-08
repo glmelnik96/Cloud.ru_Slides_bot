@@ -589,6 +589,42 @@ def test_dangling_heading_fragment_not_recovered(monkeypatch) -> None:
     assert "Полноценный потерянный пункт про укрытие" in last
 
 
+def test_allcaps_slogan_banner_not_recovered(monkeypatch) -> None:
+    """FIX7 — all-caps slogan/banner bleed (deck2/Памятки s2 repro).
+
+    The source civil-defense памятка repeats a document banner at the top of
+    every page: «ПАМЯТКА ПО ДЕЙСТВИЯМ РАБОТНИКОВ, ПО СИГНАЛУ «ВНИМАНИЕ ВСЕМ!
+    ВОЗДУШНАЯ ТРЕВОГА!»». The comma-terminated first half is caught by the
+    dangling-fragment gate (FIX5), but the second half is a complete-looking
+    ALL-CAPS slogan ending in «!»» — it does NOT end in a dangling connector
+    and is uncovered against the distributed body, so it leaked into the last
+    column on slides 1 and 2.
+
+    A multi-word ALL-CAPS slogan/banner is a document heading, never a body
+    bullet, and must be suppressed from recovery. Mixed-case body bullets are
+    unaffected.
+    """
+    monkeypatch.setattr("worker.progress.publish", lambda _ev: None)
+    raw_body = [
+        "Короткий якорный пункт колонки\n"
+        "ПО СИГНАЛУ «ВНИМАНИЕ ВСЕМ! ВОЗДУШНАЯ ТРЕВОГА!»\n"
+        "Полноценный потерянный пункт про укрытие в подвале"
+    ]
+    col1_body = "Короткий якорный пункт колонки."
+    col2_body = ""
+    state = _make_state(_two_column_artefacts(
+        raw_body=raw_body, col1_body=col1_body, col2_body=col2_body,
+    ))
+    out = assemble_plan_node(state)
+    slots = out["artefacts"]["plan"]["slides"][0]["slots"]
+    last = slots["col2_body"]
+    # The all-caps slogan banner must NOT be recovered into the column.
+    assert "ВОЗДУШНАЯ ТРЕВОГА" not in last
+    assert "ВНИМАНИЕ ВСЕМ" not in last
+    # The genuinely-dropped COMPLETE (mixed-case) line is still recovered.
+    assert "Полноценный потерянный пункт про укрытие" in last
+
+
 def test_normal_small_recovery_unchanged_by_cap(monkeypatch) -> None:
     """Part 1 — the cap must NOT bite on the normal case: a couple of
     genuinely-dropped short lines are still fully recovered (regression
