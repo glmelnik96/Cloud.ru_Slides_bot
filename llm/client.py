@@ -9,6 +9,8 @@ Provides:
 from __future__ import annotations
 
 import base64
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +39,45 @@ def get_client() -> OpenAI:
         s = get_settings()
         _client = OpenAI(api_key=s.cloudru_api_key, base_url=s.cloudru_base_url)
     return _client
+
+
+# ─── RPS limiter ─────────────────────────────────────────────────────────────
+
+# Process-wide state for the min-interval gate.  All outbound chat requests
+# flow through acquire_rps_slot() before hitting the Cloud.ru API.
+_rps_lock: threading.Lock = threading.Lock()
+_next_allowed: float = 0.0  # monotonic time at which the next slot opens
+
+
+def acquire_rps_slot() -> None:
+    """Reserve a rate-limit slot and sleep until it is allowed to start.
+
+    Thread-safe: the slot timestamp is advanced while holding ``_rps_lock``
+    so concurrent callers queue without racing; the actual sleep happens
+    outside the lock so other threads can compute their own wake-up time
+    in parallel.
+
+    Rate configured via ``CLOUDRU_MAX_RPS`` env var (float, default 2.0).
+    A value <= 0 disables the limiter entirely.
+    """
+    global _next_allowed
+    rps = float(os.environ.get("CLOUDRU_MAX_RPS", "2.0"))
+    if rps <= 0:
+        return
+
+    interval = 1.0 / rps
+    with _rps_lock:
+        now = time.monotonic()
+        # If the queue is idle, start immediately; otherwise append after the
+        # current tail.
+        wake = max(now, _next_allowed)
+        _next_allowed = wake + interval
+
+    sleep_for = wake - time.monotonic()
+    if sleep_for > 0:
+        if sleep_for > 1.0:
+            logger.debug("llm.rps_wait", wait_s=round(sleep_for, 3))
+        time.sleep(sleep_for)
 
 
 # ─── Vision helpers ──────────────────────────────────────────────────────────
@@ -163,6 +204,7 @@ def _apply_images(messages: list[dict[str, Any]], images: list[VisionImage]) -> 
 )
 def _do_call(*, model: str, messages: Iterable[dict[str, Any]], max_tokens: int,
              temperature: float, extra_body: dict[str, Any]) -> tuple[Any, float]:
+    acquire_rps_slot()
     client = get_client()
     t0 = time.perf_counter()
     resp = client.chat.completions.create(

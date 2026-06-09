@@ -84,8 +84,9 @@ ROLES: dict[Role, RoleSpec] = {
         # 2500 truncated mid-string on a 15-slide deck (Unterminated string
         # at pos 9363 on 2026-06-04 live run). Russian Cyrillic content +
         # per-placeholder diff strings push output past 8KB on big decks.
-        # Bump to 6000 — same envelope as INFOGRAPHIC_MAKER.
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=6000, extra_body=_GLM_THINKING_OFF),
+        # 8000: pre-emptive headroom — regularly hit 6000 cap triggering the
+        # auto-bump retry (+20-40s); cheaper to avoid the second call.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=8000, extra_body=_GLM_THINKING_OFF),
     Role.DESIGNER:
         # LayoutPlan over the deck; DeepSeek terse table-lookup style.
         RoleSpec(model="deepseek-ai/DeepSeek-V4-Pro", max_tokens=2000),
@@ -98,13 +99,15 @@ ROLES: dict[Role, RoleSpec] = {
         # Shape lists with EMU coordinates can grow; 4000 truncated big-deck
         # output mid-shape. 2026-06-04 live: 14-slide deck hit length-cap
         # at 6000; auto-bump to 12000 succeeded at completion_tokens=2813
-        # (with compact JSON prompt nudge). 12000 covers worst case.
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=12000, extra_body=_GLM_THINKING_OFF),
+        # (with compact JSON prompt nudge). 8000: empirical max output is
+        # ~2813 tokens, so 12000 was waste; 8000 still gives >2.8x headroom.
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=8000, extra_body=_GLM_THINKING_OFF),
     Role.COPY_EDITOR:
         # 15-slide deck × per-slot diff strings → 2000 truncated big deck.
         # 2026-06-04 live: 14-slide deck hit length-cap at 4000; auto-bump
-        # to 8000 succeeded with completion_tokens=5453.
-        RoleSpec(model="zai-org/GLM-5.1", max_tokens=8000, extra_body=_GLM_THINKING_OFF),
+        # to 8000 succeeded with completion_tokens=5453. 10000: pre-emptive
+        # headroom — regularly hit 8000 cap triggering auto-bump (+20-40s).
+        RoleSpec(model="zai-org/GLM-5.1", max_tokens=10000, extra_body=_GLM_THINKING_OFF),
     Role.VISUAL_VERIFIER:
         # Kimi vision always reasons (~5-9k chars), tokens counted under
         # completion_tokens. 5-dim rubric × 15 slides + ghost-deck narrative
