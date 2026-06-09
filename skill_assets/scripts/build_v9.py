@@ -24,12 +24,55 @@ import json
 import os
 import re
 import copy
+import io
+import threading
+from pathlib import Path
 from pptx import Presentation
 from pptx.util import Emu
 from pptx.oxml.ns import qn
 from lxml import etree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ---------------------------------------------------------------------------
+# Process-level template bytes cache (perf B3).
+#
+# Celery prefork workers are long-lived: the same Presentation template is
+# loaded from disk on every deck but the bytes never change inside a worker
+# lifetime (Docker image is immutable). Cache raw bytes keyed by
+# (resolved_path, mtime_ns, size); invalidate when either changes.
+# The Presentation OBJECT is never cached because build() mutates it.
+# ---------------------------------------------------------------------------
+_TEMPLATE_BYTES_CACHE: dict[tuple, bytes] = {}
+_TEMPLATE_BYTES_LOCK = threading.Lock()
+
+
+def _read_bytes_cached(path: str) -> bytes:
+    """Return raw bytes of *path* from a process-level cache.
+
+    Cache key is ``(resolved_path_str, st_mtime_ns, st_size)`` so any
+    on-disk change immediately invalidates the entry.  The caller must
+    construct ``Presentation(io.BytesIO(bytes_))`` — never reuse the
+    Presentation object itself across calls.
+    """
+    p = Path(path).resolve()
+    stat = p.stat()
+    key = (str(p), stat.st_mtime_ns, stat.st_size)
+    cached = _TEMPLATE_BYTES_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _TEMPLATE_BYTES_LOCK:
+        # Double-checked locking: another thread may have populated it.
+        cached = _TEMPLATE_BYTES_CACHE.get(key)
+        if cached is not None:
+            return cached
+        data = p.read_bytes()
+        # Evict stale entries for the same path (old mtime/size).
+        stale = [k for k in list(_TEMPLATE_BYTES_CACHE) if k[0] == str(p)]
+        for k in stale:
+            _TEMPLATE_BYTES_CACHE.pop(k, None)
+        _TEMPLATE_BYTES_CACHE[key] = data
+        return data
 from build_v5 import (
     load_donor_map, get_text_frame_by_shape_idx, replace_text_with_style,
     clear_text_frame
@@ -491,7 +534,7 @@ def strip_residual_markdown(prs) -> int:
 
 def build(plan_path, template_path, output_path, donor_map_path):
     plan = json.load(open(plan_path, encoding="utf-8"))
-    p = Presentation(template_path)
+    p = Presentation(io.BytesIO(_read_bytes_cached(template_path)))
     donors = load_donor_map(donor_map_path)
 
     # === STEP 1: Собираем нужные donor_nums и клонируем все слайды plan-а ===

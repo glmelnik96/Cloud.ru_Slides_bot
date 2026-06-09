@@ -17,6 +17,8 @@ nice-to-have, not required).
 from __future__ import annotations
 
 import re
+import threading
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -46,6 +48,47 @@ from schemas.slides import (
 from worker import progress
 
 logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Process-level icon-library cache (perf B3).
+#
+# icons_node() previously re-globbed the SVG directory on every deck.  The
+# icons directory is static inside the Docker image, so we cache the sorted
+# name list keyed by (resolved_dir_str, dir_mtime_ns).  A threading.Lock
+# guards the single write path; reads are lock-free after population.
+# ---------------------------------------------------------------------------
+_ICONS_CACHE: dict[tuple, list[str]] = {}
+_ICONS_CACHE_LOCK = threading.Lock()
+
+
+def _get_icon_library(icons_dir: Path) -> list[str]:
+    """Return sorted list of ``icons/<name>.svg`` strings from *icons_dir*.
+
+    Results are cached by directory mtime so a new Docker image with an
+    updated icon set is always picked up.  Returns ``[]`` when the directory
+    does not exist.
+    """
+    if not icons_dir.is_dir():
+        return []
+    try:
+        dir_mtime = icons_dir.stat().st_mtime_ns
+    except OSError:
+        return []
+    key = (str(icons_dir.resolve()), dir_mtime)
+    cached = _ICONS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _ICONS_CACHE_LOCK:
+        cached = _ICONS_CACHE.get(key)
+        if cached is not None:
+            return cached
+        result = sorted(f"icons/{p.name}" for p in icons_dir.glob("*.svg"))
+        # Evict stale entries for the same directory.
+        stale = [k for k in list(_ICONS_CACHE) if k[0] == str(icons_dir.resolve())]
+        for k in stale:
+            _ICONS_CACHE.pop(k, None)
+        _ICONS_CACHE[key] = result
+        return result
 
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
@@ -1134,9 +1177,7 @@ def icons_node(state: SessionState) -> dict[str, Any]:
     # library is populated (tracked outside M3).
     from worker.skill_bridge import SKILL_BRAND  # noqa: WPS433
     icons_dir = SKILL_BRAND / "icons"
-    icon_library = sorted(
-        f"icons/{p.name}" for p in icons_dir.glob("*.svg")
-    ) if icons_dir.is_dir() else []
+    icon_library = _get_icon_library(icons_dir)
 
     icons, _ = call_and_parse(
         role=Role.ICON_PICKER,
