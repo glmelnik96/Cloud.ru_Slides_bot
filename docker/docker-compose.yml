@@ -69,6 +69,10 @@ services:
     restart: unless-stopped
     env_file: ../.env
     environment:
+      # Make /app importable as an ABSOLUTE path entry, independent of CWD.
+      # Top-level packages (renderers, scripts) are imported lazily mid-task;
+      # relying on the implicit cwd entry breaks them if anything shifts cwd.
+      PYTHONPATH: /app
       # Shared input-deck dir mounted into the worker at the same path. Without
       # this, parse_node in the worker container can't see the .pptx the bot
       # downloaded — each container has its own /tmp.
@@ -94,6 +98,9 @@ services:
     restart: unless-stopped
     env_file: ../.env
     environment:
+      # See bot service: absolute /app on the path so lazily-imported
+      # top-level packages (renderers, scripts) resolve regardless of cwd.
+      PYTHONPATH: /app
       SLIDESBOT_INPUTS_DIR: /var/lib/slidesbot/inputs
       SLIDESBOT_WORKDIR: /var/lib/slidesbot/sessions
     volumes:

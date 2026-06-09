@@ -52,7 +52,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["bot*", "worker*", "graph*", "llm*", "renderers*", "storage*", "schemas*"]
+include = ["bot*", "worker*", "graph*", "llm*", "renderers*", "storage*", "schemas*", "scripts*"]
 
 [tool.ruff]
 line-length = 110
