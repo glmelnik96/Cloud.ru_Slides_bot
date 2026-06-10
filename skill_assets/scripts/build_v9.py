@@ -264,6 +264,70 @@ def _slot_kind(slot_name):
 # overflow off-slide. _fit_column_body is the per-column safety net.
 _COL_BODY_RE = re.compile(r"^col(\d+)?_body$")
 
+# A1: rebalance trigger — only act when the heaviest column carries >1.5×
+# the volume of the lightest (or some column is empty). Below that the LLM's
+# split is fine and re-splitting would just churn semantics.
+_COL_BALANCE_RATIO = 1.5
+
+
+def _rebalance_column_bodies(slots_filled):
+    """A1: even out item volume across colN_body slots of one slide.
+
+    The Distributor frequently skews a continuous list across column-body
+    slots (5 bullets left / 1 right). Re-split the combined newline-separated
+    items IN ORDER so each column gets ~equal word volume. No-ops when:
+    fewer than 2 col-body slots, any value is not a string, fewer items than
+    columns, or the split is already within ``_COL_BALANCE_RATIO``.
+    Returns a (possibly new) dict; never mutates the input.
+    """
+    col_names = sorted(
+        (k for k in slots_filled if _COL_BODY_RE.match(k)),
+        key=lambda k: int(_COL_BODY_RE.match(k).group(1) or 1),
+    )
+    if len(col_names) < 2:
+        return slots_filled
+    values = [slots_filled[k] for k in col_names]
+    if not all(isinstance(v, str) for v in values):
+        return slots_filled
+
+    def _vol(s):
+        return len(s.split())
+
+    per_col_items = [[l for l in v.split("\n") if l.strip()] for v in values]
+    items = [l for col in per_col_items for l in col]
+    if len(items) < len(col_names):
+        return slots_filled
+    col_vols = [sum(_vol(l) for l in col) for col in per_col_items]
+    heaviest, lightest = max(col_vols), min(col_vols)
+    if lightest > 0 and heaviest / lightest <= _COL_BALANCE_RATIO:
+        return slots_filled
+
+    # In-order greedy partition: cut where cumulative volume crosses the
+    # per-column quota, always leaving enough items for the remaining columns.
+    total = sum(_vol(l) for l in items) or 1
+    n = len(col_names)
+    out_cols, cum, item_i = [], 0, 0
+    for c in range(n):
+        quota = total * (c + 1) / n
+        col = []
+        # Leave at least one item for each remaining column.
+        max_take = len(items) - item_i - (n - c - 1)
+        while item_i < len(items) and len(col) < max_take:
+            if col and cum >= quota:
+                break
+            col.append(items[item_i])
+            cum += _vol(items[item_i])
+            item_i += 1
+        out_cols.append(col)
+    # Any leftovers go to the last column (shouldn't happen, but be safe).
+    if item_i < len(items):
+        out_cols[-1].extend(items[item_i:])
+
+    new_slots = dict(slots_filled)
+    for name, col in zip(col_names, out_cols):
+        new_slots[name] = "\n".join(col)
+    return new_slots
+
 
 def _fit_column_body(shape, base_pt, text, bold=False):
     """Shrink→truncate fit for a column-body slot so its text physically fits
@@ -742,6 +806,8 @@ def build(plan_path, template_path, output_path, donor_map_path):
         if donor_def is not None:
             slot_defs = donor_def.get("slots", {})
             slots_filled = plan_slide.get("slots", {})
+            # A1: even out skewed colN_body item distribution before filling.
+            slots_filled = _rebalance_column_bodies(slots_filled)
             styles_override = plan_slide.get("slot_styles_override", {})
 
             for slot_name, new_text in slots_filled.items():
