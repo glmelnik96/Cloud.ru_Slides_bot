@@ -24,14 +24,27 @@ _PAGE_REF_PATTERN = re.compile(
     flags=re.UNICODE | re.IGNORECASE,
 )
 
+# Truncated page-ref tail: an UNCLOSED «(стр.» / «(с. 12» at end of string.
+# Happens when an upstream model output was cut mid-citation (observed live
+# 2026-06-09: «кибербезопасность (стр.» leaked onto a slide). End-anchored so
+# legitimate parenthesised prose is never touched.
+_PAGE_REF_TAIL_PATTERN = re.compile(
+    r"\s*\(\s*(?:стр|с)\.?\s*\d*(?:\s*[,–—-]\s*\d*)*\s*$",
+    flags=re.UNICODE | re.IGNORECASE,
+)
+
 
 def _strip_pageref(s: str) -> str:
-    """Remove parenthesised «(стр. N[-M])» page-ref fragments and tidy the
-    whitespace they leave behind. Returns the input unchanged when there are no
-    matches so well-formed strings aren't churned."""
-    if not s or not _PAGE_REF_PATTERN.search(s):
+    """Remove parenthesised «(стр. N[-M])» page-ref fragments — including an
+    unclosed, truncated «(стр.» tail — and tidy the whitespace they leave
+    behind. Returns the input unchanged when there are no matches so
+    well-formed strings aren't churned."""
+    if not s:
+        return s
+    if not (_PAGE_REF_PATTERN.search(s) or _PAGE_REF_TAIL_PATTERN.search(s)):
         return s
     cleaned = _PAGE_REF_PATTERN.sub("", s)
+    cleaned = _PAGE_REF_TAIL_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return cleaned.strip()
 
