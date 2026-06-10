@@ -1228,6 +1228,34 @@ def infographic_node(state: SessionState) -> dict[str, Any]:
     return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 70}
 
 
+# ─── Enrich fan-out (B2): icons ∥ infographic ∥ copyedit ────────────────────
+#
+# All three enrichment agents depend only on distribute output
+# (classification + content) and write DISJOINT artefact keys
+# (icons / infographics / copy_edited), so they can run concurrently.
+# We parallelize inside ONE graph node (ThreadPoolExecutor) instead of three
+# parallel LangGraph branches: branch-level parallelism would require
+# reducers on every concurrently-written SessionState key (artefacts, stage,
+# progress_pct). The Cloud.ru RPS limiter in llm/client.py gates the
+# concurrent outbound calls.
+
+def enrich_fanout_node(state: SessionState) -> dict[str, Any]:
+    from concurrent.futures import ThreadPoolExecutor
+
+    _emit(state, Stage.DESIGNING, pct=55,
+          detail="иконки + инфографика + редактура")
+    branches = (icons_node, infographic_node, copyedit_node)
+    with ThreadPoolExecutor(max_workers=len(branches)) as pool:
+        futures = [pool.submit(node, state) for node in branches]
+        patches = [f.result() for f in futures]
+
+    arts = _artefacts(state)
+    for patch in patches:
+        arts.update(patch["artefacts"])
+    logger.info("node.enrich_fanout.done", session_id=state.session_id)
+    return {"artefacts": arts, "stage": Stage.DESIGNING.value, "progress_pct": 75}
+
+
 # ─── 07 Copy Editor (GLM OFF) ────────────────────────────────────────────────
 
 # Emoji codepoints render as empty squares (□) under SB Sans Display (the

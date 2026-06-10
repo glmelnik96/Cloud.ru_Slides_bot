@@ -43,11 +43,9 @@ from graph.nodes.agents import (
     autofix_node,
     brief_node,
     classify_node,
-    copyedit_node,
     design_node,
     distribute_node,
-    icons_node,
-    infographic_node,
+    enrich_fanout_node,
     issue_breakdown,
     visual_verify_node,
 )
@@ -70,9 +68,7 @@ N_BRIEF = "brief"
 N_CLASSIFY = "classify"
 N_DESIGN = "design"
 N_DISTRIBUTE = "distribute"
-N_ICONS = "icons"
-N_INFOGRAPHIC = "infographic"
-N_COPYEDIT = "copyedit"
+N_ENRICH = "enrich"
 N_ASSEMBLE = "assemble_plan"
 N_BUILD = "build"
 N_BRAND = "brand_guard"
@@ -128,9 +124,8 @@ def _build_graph() -> StateGraph:
     g.add_node(N_CLASSIFY, classify_node)
     g.add_node(N_DESIGN, design_node)
     g.add_node(N_DISTRIBUTE, distribute_node)
-    g.add_node(N_ICONS, icons_node)
-    g.add_node(N_INFOGRAPHIC, infographic_node)
-    g.add_node(N_COPYEDIT, copyedit_node)
+    # B2: icons / infographic / copyedit run concurrently inside one node.
+    g.add_node(N_ENRICH, enrich_fanout_node)
     g.add_node(N_ASSEMBLE, assemble_plan_node)
     g.add_node(N_BUILD, build_node)
     g.add_node(N_BRAND, brand_guard_node)
@@ -145,10 +140,8 @@ def _build_graph() -> StateGraph:
     g.add_edge(N_BRIEF, N_CLASSIFY)
     g.add_edge(N_CLASSIFY, N_DESIGN)
     g.add_edge(N_DESIGN, N_DISTRIBUTE)
-    g.add_edge(N_DISTRIBUTE, N_ICONS)
-    g.add_edge(N_ICONS, N_INFOGRAPHIC)
-    g.add_edge(N_INFOGRAPHIC, N_COPYEDIT)
-    g.add_edge(N_COPYEDIT, N_ASSEMBLE)
+    g.add_edge(N_DISTRIBUTE, N_ENRICH)
+    g.add_edge(N_ENRICH, N_ASSEMBLE)
     g.add_edge(N_ASSEMBLE, N_BUILD)
     g.add_edge(N_BUILD, N_BRAND)
     g.add_edge(N_BRAND, N_RENDER_PNG)
