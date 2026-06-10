@@ -1097,6 +1097,53 @@ def design_node(state: SessionState) -> dict[str, Any]:
             repairs=repairs,
         )
 
+    # A4: capacity scoring — the designer picks by content TYPE; when the
+    # slide's raw text volume badly overloads the chosen donor's body
+    # capacity, swap for the smallest content-family donor that fits.
+    brief_by_num: dict[int, dict[str, Any]] = {
+        int(s.get("num", 0)): s
+        for s in ((arts.get("brief") or {}).get("slides") or [])
+    }
+    upgrades: list[dict[str, Any]] = []
+    for entry in layouts_dump.get("slides") or []:
+        idx = entry.get("layout_idx")
+        if not idx:
+            continue
+        cls = cls_by_num.get(int(entry.get("num") or 0)) or {}
+        if cls.get("slide_type"):
+            continue  # native render — donor is decorative only
+        src = cls.get("_source_slide") or entry.get("num")
+        bslide = brief_by_num.get(int(src or 0)) or {}
+        required = sum(
+            len(x) for x in (bslide.get("raw_body") or []) if isinstance(x, str)
+        )
+        if cls.get("_source_slide"):
+            required //= 2  # split rules always split into 2 parts
+        new_idx = donor_map.upgrade_donor_for_volume(
+            int(idx),
+            cls.get("category", "other"),
+            required,
+            dark=bool(cls.get("dark")),
+        )
+        if new_idx is None:
+            continue
+        upgrades.append({
+            "num": entry.get("num"), "from": idx, "to": new_idx,
+            "required_chars": required,
+            "capacity": donor_map.body_capacity(int(idx)),
+        })
+        entry["layout_idx"] = new_idx
+        entry["rationale"] = (entry.get("rationale") or "") + \
+            " [capacity-upgrade: content volume exceeds donor body capacity]"
+
+    if upgrades:
+        logger.info(
+            "node.design.capacity_upgrades",
+            session_id=state.session_id,
+            count=len(upgrades),
+            upgrades=upgrades,
+        )
+
     arts["layouts"] = layouts_dump
     logger.info("node.design.done", session_id=state.session_id,
                 slides=len(layouts_dump.get("slides") or []),

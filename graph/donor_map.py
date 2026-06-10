@@ -355,6 +355,87 @@ def is_timeline_donor(layout_idx: int) -> bool:
     return has_dates and has_steps
 
 
+def body_capacity(layout_idx: int) -> int:
+    """Total comfortable char budget across the body-type slots of a donor.
+
+    Sums ``effective_safe_max_chars`` over slots classified as BODY (same
+    classifier the distributor trusts). Native (``0``) and unknown donors
+    return 0.
+    """
+    if not layout_idx:
+        return 0
+    donor = _load().get(int(layout_idx))
+    if donor is None:
+        return 0
+    total = 0
+    for name, slot in (donor.get("slots") or {}).items():
+        if not isinstance(slot, dict):
+            continue
+        if _slot_name_to_ooxml(name) != "BODY":
+            continue
+        total += effective_safe_max_chars(slot) or 0
+    return total
+
+
+# A4: donor capacity scoring. The Layout Designer picks by content TYPE and
+# routinely sends text-heavy slides to small donors (content_text = 140
+# comfortable chars). When the slide's raw volume exceeds
+# CAPACITY_OVERLOAD_RATIO × capacity (the distributor can squeeze up to
+# ~1.5×, beyond that it drops content or overflows), we deterministically
+# swap the pick for the smallest content-family donor that fits.
+CAPACITY_OVERLOAD_RATIO = 1.5
+
+# Categories whose slides are body-volume driven and safe to re-route within
+# the light content family. Visual/structural categories (title, divider,
+# image, table, timeline, callout, …) are never touched — their capacity
+# isn't body-driven and swapping changes the slide's nature.
+_CAPACITY_UPGRADE_CATEGORIES = {"text", "multicolumn", "pattern_bg", "tech", "other"}
+
+# Upgrade ladder: all light content donors, regardless of which bucket the
+# original pick came from (content_text → 2col → 3col → 4/6/8 blocks).
+_CONTENT_FAMILY_BUCKETS = [
+    "content_text", "content_2col", "content_3col",
+    "content_4block", "content_6subtitles", "content_8subtitles",
+]
+
+
+def upgrade_donor_for_volume(
+    layout_idx: int,
+    category: str,
+    required_chars: int,
+    dark: bool = False,
+) -> int | None:
+    """Return a higher-capacity content-family donor when *required_chars*
+    badly overloads the current pick, else ``None`` (keep the pick).
+
+    Dark slides are kept as-is: the content-family alternatives are all
+    light donors and a capacity upgrade must not flip the slide's tone.
+    """
+    if dark or not required_chars:
+        return None
+    if category not in _CAPACITY_UPGRADE_CATEGORIES:
+        return None
+    current = body_capacity(layout_idx)
+    if current and required_chars <= CAPACITY_OVERLOAD_RATIO * current:
+        return None
+    eq = category_equivalence()
+    candidates: list[int] = []
+    for bucket in _CONTENT_FAMILY_BUCKETS:
+        for idx in eq.get(bucket, []):
+            if idx not in candidates:
+                candidates.append(idx)
+    if not candidates:
+        return None
+    fitting = [i for i in candidates if body_capacity(i) >= required_chars]
+    if fitting:
+        best = min(fitting, key=lambda i: (body_capacity(i), i))
+    else:
+        best = max(candidates, key=lambda i: (body_capacity(i), -i))
+    if best == int(layout_idx) or body_capacity(best) <= current:
+        return None
+    return best
+
+
 def slot_max_chars(layout_idx: int, slot_name: str) -> int | None:
     """Physical ``max_chars`` capacity of a single donor slot, or ``None``
     when the donor/slot is unknown or carries no capacity hint.
@@ -376,6 +457,8 @@ def slot_max_chars(layout_idx: int, slot_name: str) -> int | None:
 
 
 __all__ = [
+    "body_capacity",
+    "upgrade_donor_for_volume",
     "slot_specs_for_layouts",
     "slot_name_by_ph_idx",
     "body_ph_indices",
