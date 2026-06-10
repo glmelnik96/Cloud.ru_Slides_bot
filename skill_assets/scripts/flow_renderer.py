@@ -1098,11 +1098,19 @@ def render_numbered_rows(slide, cfg, dark=False):
                   font_size=num_size, bold=False, anchor="top", color=title_col)
         tx = x + num_w
         tw = cw - num_w
+        # A2: высота заголовка под РЕАЛЬНОЕ число строк + shrink-to-fit в
+        # пределах половины слота — раньше box считался на ~1 строку и
+        # 2-3-строчный заголовок наезжал на тело снизу.
+        t_h = int(1.4 * title_size * 4 / 3)
         if title:
-            add_label(slide, tx, y, tw, int(1.4 * title_size * 4 / 3), title,
-                      font_size=title_size, bold=True, anchor="top", color=title_col)
+            t_cap = max(t_h, slot_h // 2)
+            t_size, title = _fit_card_body(title, tw, t_cap, title_size, bold=True)
+            t_lines = _real_lines(title, tw, t_size, bold=True)
+            t_h = max(t_h, int(t_lines * 1.25 * t_size * 4.0 / 3.0) + 4)
+            add_label(slide, tx, y, tw, t_h, title,
+                      font_size=t_size, bold=True, anchor="top", color=title_col)
         if text:
-            ty = y + int(1.5 * title_size * 4 / 3)
+            ty = y + t_h + max(2, int(0.1 * title_size * 4 / 3))
             add_label(slide, tx, ty, tw, slot_h - (ty - y), text,
                       font_size=text_size, bold=False, anchor="top", color=body_col)
 
@@ -1168,9 +1176,13 @@ def render_card_grid(slide, cfg, dark=False):
             tx = x + pad + chip + 14
             tw = cw - (tx - x) - pad
             # Заголовок в строку с чипом — по центру высоты чипа.
+            # A2: длинный заголовок раньше рисовался полным кеглем и вытекал
+            # за карточку — теперь shrink-to-fit в box (tw × chip).
             if title:
+                t_size, title = _fit_card_body(
+                    title, tw, chip, title_size, bold=True)
                 add_label(slide, tx, y + pad, tw, chip, title,
-                          font_size=title_size, bold=True,
+                          font_size=t_size, bold=True,
                           anchor="middle", color=title_col)
             body_y = y + pad + chip + 12
             body_x, body_w = tx, tw

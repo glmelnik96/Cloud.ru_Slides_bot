@@ -134,7 +134,10 @@ class TestRpsLimiterThreadSafety:
 
     def test_no_double_slot_reservation(self, monkeypatch):
         """No two threads should be granted the same time slot (monotonic gaps)."""
-        acquire = _fresh_limiter(50.0, monkeypatch)  # 0.02s interval
+        # 50ms interval: wide enough that OS scheduling jitter between the
+        # acquire() return and the timestamp append (observed ~10ms under a
+        # loaded full-suite run on Windows) cannot collapse two measured gaps.
+        acquire = _fresh_limiter(20.0, monkeypatch)
         slots: list[float] = []
         slot_lock = threading.Lock()
 
@@ -153,6 +156,6 @@ class TestRpsLimiterThreadSafety:
         slots.sort()
         for i in range(1, len(slots)):
             gap = slots[i] - slots[i - 1]
-            assert gap >= 0.012, (  # 8ms slack below 20ms interval
-                f"Slots {i-1} and {i} are too close: gap={gap:.4f}s (expected >= 0.012s)"
+            assert gap >= 0.025, (  # 25ms slack below the 50ms interval
+                f"Slots {i-1} and {i} are too close: gap={gap:.4f}s (expected >= 0.025s)"
             )
