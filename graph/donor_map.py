@@ -195,6 +195,26 @@ def default_donor_for_category(
     return None
 
 
+# A3: when a slot has no explicit safe_max_chars, treat ~70% of the hard
+# ceiling as the comfortable budget instead of handing the LLM the ceiling
+# itself (which caused overflow/cramped text on slots missing the field).
+# Mirrored as a literal in skill_assets/scripts/{validate_plan,build_v9}.py
+# (vendored scripts are standalone and cannot import graph.*).
+SAFE_MAX_FALLBACK_RATIO = 0.70
+
+
+def effective_safe_max_chars(slot: dict[str, Any]) -> int | None:
+    """Comfortable char budget for a slot: explicit ``safe_max_chars``,
+    else ``int(0.70 * max_chars)``, else None."""
+    safe = slot.get("safe_max_chars")
+    if safe:
+        return int(safe)
+    hard = slot.get("max_chars")
+    if hard:
+        return int(SAFE_MAX_FALLBACK_RATIO * hard)
+    return None
+
+
 def donor_summary() -> list[dict[str, Any]]:
     """Compact per-donor record for the Layout Designer prompt.
 
@@ -210,7 +230,7 @@ def donor_summary() -> list[dict[str, Any]]:
         max_chars = 0
         for slot in slots.values():
             if isinstance(slot, dict):
-                v = slot.get("safe_max_chars") or slot.get("max_chars") or 0
+                v = effective_safe_max_chars(slot) or 0
                 if isinstance(v, int) and v > max_chars:
                     max_chars = v
         out.append({
@@ -255,7 +275,7 @@ def slot_specs_for_layouts(layout_idxs: list[int]) -> dict[str, list[dict[str, A
                 "ph_idx": slot.get("shape_idx"),
                 "ph_type": _slot_name_to_ooxml(slot_name),
                 "slot_name": slot_name,  # keep original for debug / future use
-                "safe_max_chars": slot.get("safe_max_chars") or slot.get("max_chars"),
+                "safe_max_chars": effective_safe_max_chars(slot),
             }
             # Drop slots without a shape_idx — meaningless to the distributor.
             if spec["ph_idx"] is None:

@@ -768,7 +768,12 @@ def build(plan_path, template_path, output_path, donor_map_path):
                 # (normAutofit) because LibreOffice's autofit support is
                 # inconsistent across versions used by render_png.
                 txt_str = str(new_text or "")
-                safe_max = slot_cfg.get("safe_max_chars") or slot_cfg.get("max_chars")
+                # A3: missing safe_max_chars → ~70% of the hard ceiling, not the
+                # ceiling itself (sync with graph.donor_map.SAFE_MAX_FALLBACK_RATIO).
+                _hard_max = slot_cfg.get("max_chars")
+                safe_max = slot_cfg.get("safe_max_chars") or (
+                    int(0.70 * _hard_max) if _hard_max else None
+                )
                 base_size = (override or {}).get("size_pt") or slot_cfg.get("size_pt")
                 # Geometric fitter (primary): measure the rendered text against
                 # the box's real geometry, shrink to fit width+height, and

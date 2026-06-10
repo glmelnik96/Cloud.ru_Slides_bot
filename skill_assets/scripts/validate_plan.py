@@ -202,7 +202,9 @@ def validate_slide(slide_idx, slide, donors):
         text = content if isinstance(content, str) else (content.get("text", "") if isinstance(content, dict) else "")
         text_len = len(str(text))
         max_chars = donor_slot.get("max_chars")
-        safe_max = donor_slot.get("safe_max_chars")
+        # A3: слоты без явного safe_max_chars получают ~70% от max_chars,
+        # а не сам потолок (синхронно с graph.donor_map.SAFE_MAX_FALLBACK_RATIO).
+        safe_max = donor_slot.get("safe_max_chars") or (int(0.70 * max_chars) if max_chars else None)
 
         if max_chars and text_len > max_chars:
             # Auto-apply STRATEGY 3 (brand-rules.md §14b): уменьшить размер на 20%
