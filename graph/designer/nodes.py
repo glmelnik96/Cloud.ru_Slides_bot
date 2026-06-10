@@ -6,6 +6,8 @@ reused from the donor pipeline (read-only).
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,9 @@ from graph.nodes.pipeline import _output_filename, _session_workdir
 logger = structlog.get_logger(__name__)
 
 COMPOSE_RETRY_BUDGET = 2  # spec §10: max 2 re-composes before fallback
+# Slides are independent → compose them concurrently. Cloud.ru cap is 20 RPS,
+# each slide makes 1-6 sequential calls, so 4 workers stay far below the limit.
+COMPOSE_WORKERS = max(1, int(os.environ.get("DESIGNER_COMPOSE_WORKERS", "4")))
 
 
 def _artefacts(state: SessionState) -> dict[str, Any]:
@@ -200,9 +205,9 @@ def compose_node(state: SessionState) -> dict[str, Any]:
 
     use_critic = bool(arts.get("designer_use_critic", True))
     use_vision_qa = bool(arts.get("designer_vision_qa", True))
-    comps: list[dict[str, Any]] = []
-    fallbacks = 0
-    for i, cls in enumerate(cls_slides):
+
+    def _compose_slide(i: int, cls: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        """Compose one slide; returns (comp | None for phantom, is_fallback)."""
         num = int(cls.get("num") or (i + 1))
         archetype = archetype_for(cls, is_first=(i == 0))
         content = slide_content_for(cls, brief_by_num.get(num))
@@ -212,18 +217,29 @@ def compose_node(state: SessionState) -> dict[str, Any]:
         has_native = any(content.get(k) for k in ("kpi", "chart", "table", "flow", "image"))
         if not has_text and not has_native:
             logger.info("node.compose.skip_phantom", session_id=state.session_id, num=num)
-            continue  # phantom/empty slide — do not fabricate
+            return None, False  # phantom/empty slide — do not fabricate
+        is_fallback = False
         layouts = layout_options(archetype, content)
         if layouts:
             comp = _compose_skeleton(stub, content, archetype, layouts, num)
         else:
             comp = _compose_one(stub, content, archetype, num, use_critic=use_critic)
             if not comp.get("blocks") or all(b.get("role") == "title" for b in comp["blocks"]):
-                fallbacks += 1
+                is_fallback = True
         if use_vision_qa:
             comp = vision_repair(comp, stub, content, archetype, layouts, num,
                                  _skeleton_fallback)
-        comps.append(comp)
+        return comp, is_fallback
+
+    # Slides are independent: compose them in parallel, preserving slide order.
+    if COMPOSE_WORKERS > 1 and len(cls_slides) > 1:
+        with ThreadPoolExecutor(max_workers=COMPOSE_WORKERS) as pool:
+            results = list(pool.map(lambda ic: _compose_slide(*ic), enumerate(cls_slides)))
+    else:
+        results = [_compose_slide(i, cls) for i, cls in enumerate(cls_slides)]
+
+    comps = [comp for comp, _ in results if comp is not None]
+    fallbacks = sum(1 for comp, fb in results if comp is not None and fb)
 
     arts["compositions"] = comps
     logger.info("node.compose.done", session_id=state.session_id,

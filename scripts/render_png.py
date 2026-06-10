@@ -10,6 +10,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -35,11 +37,27 @@ def _find_soffice() -> str:
     raise RuntimeError("LibreOffice (soffice) not found; set SOFFICE_BIN")
 
 
+# Per-thread LibreOffice user profile: concurrent soffice instances would
+# fight over the shared profile lock and fail silently/hang (required for the
+# parallel compose vision-QA renders). Reused within a thread so the ~5s
+# first-run profile bootstrap is paid once per pool thread, not per render.
+_lo_profile = threading.local()
+
+
+def _lo_profile_uri() -> str:
+    prof = getattr(_lo_profile, "dir", None)
+    if prof is None:
+        prof = tempfile.TemporaryDirectory(prefix="lo_profile_")
+        _lo_profile.dir = prof  # finalizer cleans up at thread/process teardown
+    return Path(prof.name).as_uri()
+
+
 def pptx_to_pdf(pptx: Path, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        [_find_soffice(), "--headless", "--convert-to", "pdf", "--outdir",
-         str(out_dir), str(pptx)],
+        [_find_soffice(), "--headless",
+         f"-env:UserInstallation={_lo_profile_uri()}",
+         "--convert-to", "pdf", "--outdir", str(out_dir), str(pptx)],
         check=True, timeout=180,
     )
     pdf = out_dir / (pptx.stem + ".pdf")
