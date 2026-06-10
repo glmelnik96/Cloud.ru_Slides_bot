@@ -1,6 +1,6 @@
 """Cancel paths: the inline button (callback `cancel:<sid>`) and the
 `/cancel` command. Both revoke the Celery task, publish a cancelled event so
-the progress subscriber updates the message, and release the user lock.
+the progress subscriber updates the message, and release the per-user lock.
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import structlog
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from bot.jobs import get_active_session, load_job, release_global_lock
+from bot.jobs import get_active_session_for_user, load_job, release_user_lock
 from bot.middleware.whitelist import guarded
 from worker import progress
 
@@ -27,11 +27,11 @@ def _cancel_session(session_id: str) -> dict | None:
     celery_app.control.revoke(job["task_id"], terminate=True, signal="SIGTERM")
     logger.info("cancel.revoked", session_id=session_id, task_id=job["task_id"])
     # Publishing the cancelled event lets the live progress subscriber run its
-    # on-terminal hook (release the global lock + dispatch the next queued job).
-    # We also release here directly as a safety net in case no subscriber is
-    # listening (e.g. after a bot restart); release is idempotent.
+    # on-terminal hook (release the per-user lock + dispatch the next queued
+    # job). We also release here directly as a safety net in case no subscriber
+    # is listening (e.g. after a bot restart); release is idempotent.
     progress.cancelled(session_id)
-    release_global_lock(session_id)
+    release_user_lock(job["user_id"], session_id)
     return job
 
 
@@ -48,13 +48,14 @@ async def cancel_pressed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @guarded
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/cancel` — kill the user's active task without needing the inline button."""
-    active = get_active_session()
+    user_id = update.effective_user.id
+    active = get_active_session_for_user(user_id)
     if active is None:
         await update.message.reply_text("Нет активной задачи.")
         return
     if _cancel_session(active) is None:
         # Lock pointed at a session whose job record is gone — clean it up.
-        release_global_lock(active)
+        release_user_lock(user_id, active)
         await update.message.reply_text("Лок снят, активной задачи не было.")
         return
     await update.message.reply_text("Останавливаю задачу…")

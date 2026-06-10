@@ -20,7 +20,7 @@ from telegram.ext import ContextTypes
 from bot.handlers.progress import start_subscriber
 from bot.i18n.progress import format_progress
 from bot.i18n.ru import VERSTAI_BAD_TYPE, VERSTAI_NEED_FILE
-from bot.jobs import claim_global_lock, enqueue_job, release_global_lock, save_job
+from bot.jobs import claim_user_lock, enqueue_job, release_user_lock, save_job
 from bot.middleware.whitelist import guarded
 from bot.queue_dispatch import make_on_terminal
 from schemas.session import Mode, SessionInput
@@ -125,9 +125,9 @@ async def _dispatch_pptx_job(
     )
     inp = inp.model_copy(update={"progress_message_id": status_msg.message_id})
 
-    # One global run-slot: if it's free we start immediately, otherwise the job
+    # Per-user run-slot: if it's free we start immediately, otherwise the job
     # waits its turn in the queue and is dispatched on the active job's terminal.
-    if not claim_global_lock(inp.session_id):
+    if not claim_user_lock(user.id, inp.session_id):
         entry = {
             "session_id": inp.session_id,
             "user_id": user.id,
@@ -144,7 +144,7 @@ async def _dispatch_pptx_job(
             return
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=status_msg.message_id,
-            text=f"⏳ В очереди, позиция {position}. Начну, как освободится воркер.",
+            text=f"⏳ У вас уже идёт сборка, позиция в очереди {position}. Начну, как завершится текущая.",
             parse_mode=ParseMode.HTML,
         )
         logger.info(f"{log_prefix}.queued", session_id=inp.session_id,
@@ -155,7 +155,7 @@ async def _dispatch_pptx_job(
         from worker.tasks.pipeline import run_pipeline
         async_result = run_pipeline.delay(inp.model_dump(mode="json"))
     except Exception as e:  # noqa: BLE001
-        release_global_lock(inp.session_id)
+        release_user_lock(user.id, inp.session_id)
         logger.exception(f"{log_prefix}.enqueue_failed", error=str(e))
         await update.message.reply_text("Не удалось поставить задачу. Попробуйте позже.")
         return

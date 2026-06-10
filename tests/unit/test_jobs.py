@@ -76,6 +76,54 @@ def test_release_global_lock_only_if_owner(fake_redis):
     assert claim_global_lock("sess-b") is True
 
 
+# ---------------------------------------------------------------------------
+# Per-user lock tests
+# ---------------------------------------------------------------------------
+
+def test_claim_user_lock_different_users_both_succeed(fake_redis):
+    """Two distinct user_ids can each hold their own run-slot simultaneously."""
+    from bot.jobs import claim_user_lock
+    assert claim_user_lock(user_id=1, session_id="sess-u1") is True
+    assert claim_user_lock(user_id=2, session_id="sess-u2") is True
+
+
+def test_claim_user_lock_same_user_second_claim_fails(fake_redis):
+    """The same user cannot hold two slots; second claim returns False."""
+    from bot.jobs import claim_user_lock
+    assert claim_user_lock(user_id=1, session_id="sess-a") is True
+    assert claim_user_lock(user_id=1, session_id="sess-b") is False
+
+
+def test_release_user_lock_stale_session_is_noop(fake_redis):
+    """release_user_lock with the wrong session_id must not free the lock."""
+    from bot.jobs import claim_user_lock, get_active_session_for_user, release_user_lock
+    assert claim_user_lock(user_id=42, session_id="sess-real") is True
+    # A stale or wrong session_id must not release.
+    release_user_lock(user_id=42, session_id="sess-stale")
+    assert get_active_session_for_user(user_id=42) == "sess-real"
+
+
+def test_release_user_lock_correct_session_frees_slot(fake_redis):
+    """release_user_lock with the correct session_id frees the slot for re-claim."""
+    from bot.jobs import claim_user_lock, get_active_session_for_user, release_user_lock
+    assert claim_user_lock(user_id=7, session_id="sess-x") is True
+    release_user_lock(user_id=7, session_id="sess-x")
+    assert get_active_session_for_user(user_id=7) is None
+    # Slot is now free; same user can start a new job.
+    assert claim_user_lock(user_id=7, session_id="sess-y") is True
+
+
+def test_release_user_lock_does_not_affect_other_users(fake_redis):
+    """Releasing one user's lock leaves other users' locks intact."""
+    from bot.jobs import claim_user_lock, get_active_session_for_user, release_user_lock
+    assert claim_user_lock(user_id=10, session_id="s10") is True
+    assert claim_user_lock(user_id=20, session_id="s20") is True
+    release_user_lock(user_id=10, session_id="s10")
+    assert get_active_session_for_user(user_id=10) is None
+    # User 20's lock is untouched.
+    assert get_active_session_for_user(user_id=20) == "s20"
+
+
 def test_enqueue_returns_position_and_dequeue_is_fifo(fake_redis):
     from bot.jobs import dequeue_job, enqueue_job
     assert enqueue_job({"session_id": "s1"}) == 1

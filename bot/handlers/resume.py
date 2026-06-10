@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 
 from bot.handlers.progress import start_subscriber
 from bot.i18n.progress import format_progress
-from bot.jobs import claim_global_lock, load_job, save_job, update_job_task_id
+from bot.jobs import claim_user_lock, load_job, save_job, update_job_task_id
 from bot.middleware.whitelist import guarded
 from bot.queue_dispatch import make_on_terminal
 
@@ -36,9 +36,9 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Эта сессия принадлежит другому пользователю.")
         return
 
-    if not claim_global_lock(session_id):
+    if not claim_user_lock(update.effective_user.id, session_id):
         await update.message.reply_text(
-            "Сейчас выполняется другая задача. Дождитесь её завершения перед возобновлением."
+            "У вас уже идёт сборка. Дождитесь её завершения перед возобновлением."
         )
         return
 
