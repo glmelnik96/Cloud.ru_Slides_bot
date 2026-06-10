@@ -20,7 +20,7 @@ import structlog
 from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -196,11 +196,39 @@ def _apply_images(messages: list[dict[str, Any]], images: list[VisionImage]) -> 
     return out
 
 
+def _is_transient_api_error(exc: BaseException) -> bool:
+    """Retry only genuinely transient Cloud.ru failures.
+
+    5xx («Internal Server Error», 503 «no healthy upstream» storms), 408/409
+    timeouts/conflicts, 429 rate limits and connection-level errors are worth
+    waiting out; any other 4xx is a caller bug — retrying just burns time.
+    """
+    if isinstance(exc, (APIConnectionError, RateLimitError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in (408, 409, 429) or exc.status_code >= 500
+    return False
+
+
+def _log_retry(retry_state: Any) -> None:
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    logger.warning(
+        "llm.call.retry",
+        attempt=retry_state.attempt_number,
+        wait_s=round(getattr(retry_state.next_action, "sleep", 0.0), 1),
+        error=f"{type(exc).__name__}: {exc}" if exc else "?",
+    )
+
+
+# Sized to ride out a multi-minute 503 burst (observed live 2026-06-10):
+# 6 attempts with exp backoff 2→45s ≈ up to ~1.5 min of pure waiting on top
+# of the OpenAI client's own internal retries.
 @retry(
     reraise=True,
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=2, min=2, max=8),
-    retry=retry_if_exception_type((APIConnectionError, RateLimitError, APIStatusError)),
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=2, min=2, max=45),
+    retry=retry_if_exception(_is_transient_api_error),
+    before_sleep=_log_retry,
 )
 def _do_call(*, model: str, messages: Iterable[dict[str, Any]], max_tokens: int,
              temperature: float, extra_body: dict[str, Any]) -> tuple[Any, float]:

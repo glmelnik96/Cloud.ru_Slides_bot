@@ -29,6 +29,17 @@ from schemas.design import CriticVerdict, PixelVerdict
 
 logger = structlog.get_logger(__name__)
 
+# Celery's soft time limit is delivered as an exception that subclasses plain
+# Exception — the fail-open handlers below MUST let it through, otherwise the
+# worker keeps composing until the hard kill (observed live 2026-06-10: 1h
+# hang, no terminal event). Conditional import keeps renderers/ importable
+# outside the worker (host probes/scripts without celery installed).
+try:
+    from billiard.exceptions import SoftTimeLimitExceeded
+except ImportError:  # pragma: no cover — host env without celery/billiard
+    class SoftTimeLimitExceeded(BaseException):  # type: ignore[no-redef]
+        pass
+
 _REPO = Path(__file__).resolve().parent.parent.parent
 _EXEMPLAR_DIR = _REPO / "skill_assets" / "brand" / "references" / "exemplars"
 
@@ -77,12 +88,16 @@ _CRITIC_SYSTEM = """\
   их может быть несколько; но зелёные ЗАЛИВКИ (фоны карточек/плашек/текста)
   вне разрешённых мест (фон cover-green, шапка th .brand-table, заголовок
   cover-dark) — брак. Зелёный текст на белом — брак.
+  НЕ брак: class="accent" на th/td в .brand-table — это СИНЯЯ акцент-колонка
+  (var(--blue)/синие тинты, разрешённый data-viz приём), ровно одна на таблицу.
 - Запрещено: linear-gradient/radial-gradient в декоративных заливках (radial в
   .dot-grid — разрешённый мотив), box-shadow, border-radius > 4px, font-style:
   italic, text-decoration: underline, не-брендовые цвета (кроме data-viz:
   var(--blue)/тинты в таблице, пастель в графике).
 - Текст из payload присутствует ДОСЛОВНО (не переписан, не переведён, не
   выброшен). Мелкая типографика (тире/кавычки) не в счёт.
+  ИСКЛЮЧЕНИЕ: key_phrase, дублирующая заголовок слайда (или почти совпадающая
+  с ним), по канону НЕ выводится — её отсутствие не брак, не требуй её.
 - Вертикальное распределение по вёрстке: контент растянут на безопасную зону
   (justify-content/space-between/row-gap/.takeaway), а не одним комком сверху.
 
@@ -112,6 +127,8 @@ def critic_gate(html: str, content: dict[str, Any]) -> CriticVerdict:
             model_cls=CriticVerdict,
         )
         return verdict
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         logger.warning("html_qa.critic_fail", err=str(exc))
         return CriticVerdict(verdict="READY", reasons=[])
@@ -128,6 +145,8 @@ def judge_slide(content: dict[str, Any], png: bytes,
             model_cls=PixelVerdict,
         )
         return verdict
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         logger.warning("html_qa.judge_fail", err=str(exc))
         return PixelVerdict(ok=True, issues=[])
