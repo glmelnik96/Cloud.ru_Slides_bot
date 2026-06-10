@@ -16,6 +16,8 @@ import difflib
 import re
 from typing import Any
 
+from graph.designer.planner import _strip_pageref  # noqa: PLC2701 — read-only reuse
+
 _SNAP_RATIO = 0.80  # below this a string is "different text", not a typo
 
 _NUM_RE = re.compile(r"\d[\d\s.,%]*")
@@ -38,11 +40,14 @@ def _grounded_lines(parsed_slide: dict[str, Any]) -> list[str]:
             lines.append(str(h))
         for row in t.get("rows") or []:
             lines.extend(str(c) for c in row)
-    # Dedup, keep order, drop empties.
+    # Dedup, keep order, drop empties. Page-refs «(стр. N)» — including the
+    # truncated «(стр.» tail — are navigation junk even when they sit in the
+    # source deck verbatim; strip them so _snap never re-introduces a ref the
+    # planner already removed (observed live 2026-06-10: s07/s14 leak).
     seen: set[str] = set()
     out = []
     for ln in lines:
-        ln = ln.strip()
+        ln = _strip_pageref(ln.strip())
         key = _norm(ln)
         if ln and key not in seen:
             seen.add(key)
@@ -79,10 +84,12 @@ def _fix_numeric_title(payload: dict[str, Any],
         # If the recovered title also sits in body — drop the duplicate.
         payload["body"] = [b for b in body if _norm(b) != _norm(parsed_title)]
         return
-    # Fallback: promote the first short heading-looking body line.
+    # Fallback: promote the first short heading-looking body line —
+    # never a numeric-only line (that's the same leaked page number).
     for i, b in enumerate(body):
         bs = str(b).strip()
-        if bs and len(bs) <= 60 and not bs.endswith(('.', ';', ':')):
+        if (bs and len(bs) <= 60 and not bs.endswith(('.', ';', ':'))
+                and not re.fullmatch(r"[\d\s.\-–—/]+", bs)):
             payload["title"] = bs
             payload["body"] = body[:i] + body[i + 1:]
             return
@@ -144,7 +151,19 @@ def snap_payload(payload: dict[str, Any],
     if payload.get("title"):
         payload["title"] = _snap(str(payload["title"]), grounded)
     if payload.get("body"):
-        payload["body"] = [_snap(str(b), grounded) for b in payload["body"]]
+        # Numeric-only body lines are leaked page numbers, not content.
+        payload["body"] = [
+            _snap(str(b), grounded) for b in payload["body"]
+            if not re.fullmatch(r"[\d\s.\-–—/]+", str(b).strip())
+        ]
     if isinstance(payload.get("kpi"), dict):
         _fix_kpi(payload["kpi"], grounded)
+
+    # Canon: a key_phrase that (near-)duplicates the slide title is never
+    # rendered. Drop it deterministically — relying on the composer prompt
+    # alone proved flaky (run2 s09: takeaway-dup overlapped the card grid).
+    kp, title = _norm(str(payload.get("key_phrase") or "")), _norm(str(payload.get("title") or ""))
+    if kp and title and (title in kp or
+                         difflib.SequenceMatcher(None, kp, title).ratio() >= 0.80):
+        payload["key_phrase"] = ""
     return payload

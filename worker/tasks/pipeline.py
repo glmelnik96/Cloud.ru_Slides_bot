@@ -30,11 +30,15 @@ def run_pipeline(self, payload: dict[str, Any]) -> dict[str, Any]:
     log = logger.bind(session_id=state.session_id, user_id=state.user_id, task_id=self.request.id)
     log.info("pipeline.start", mode=state.mode)
     try:
-        # /design uses the standalone from-scratch designer graph; everything
-        # else (verstai/audit/brief) stays on the donor pipeline graph.
+        # /design uses the standalone from-scratch designer graph, /html the
+        # HTML-render graph; everything else (verstai/audit/brief) stays on
+        # the donor pipeline graph.
         if state.mode == Mode.DESIGN.value:
             from graph.designer.graph import get_compiled_designer_graph
             graph = get_compiled_designer_graph()
+        elif state.mode == Mode.HTML.value:
+            from graph.html.graph import get_compiled_html_graph
+            graph = get_compiled_html_graph()
         else:
             graph = get_compiled_graph()
         final = graph.invoke(state.model_dump(), cfg)

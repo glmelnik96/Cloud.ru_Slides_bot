@@ -13,6 +13,7 @@ lands in tmp/html_out/.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -137,6 +138,22 @@ def main() -> int:
                       flush=True)
                 body = compose_slide(payload, brand_css, feedback=cv.reasons)
 
+            # Gate 0 (deterministic): slide title must appear verbatim in the
+            # HTML — composers occasionally drop a letter («ВЗГЛЯД»→«ВЗГЛЯ»)
+            # and the LLM judges don't reliably catch it (run2 s13). Runs AFTER
+            # the critic gate because a critic-repair recompose can itself
+            # corrupt the title (run3 s13).
+            title = re.sub(r"\s+", " ", str(payload.get("title") or "")).strip()
+            if title:
+                for _ in range(2):
+                    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body))
+                    if title.lower() in text.lower():
+                        break
+                    print(f"  slide {num}: title-verbatim FAIL — recomposing", flush=True)
+                    body = compose_slide(payload, brand_css, feedback=[
+                        f"Заголовок слайда искажён или отсутствует. Выведи его ДОСЛОВНО: «{title}»",
+                    ])
+
             # Gate 2: vision pixel-judge on the render (keep-better repair).
             png = renderer.render(body)
             for _ in range(VISION_REPAIR_BUDGET):
@@ -146,6 +163,12 @@ def main() -> int:
                 print(f"  slide {num}: judge NOT-OK — {'; '.join(pv.issues)[:160]}",
                       flush=True)
                 cand_body = compose_slide(payload, brand_css, feedback=pv.issues)
+                # A repair that corrupts the verbatim title is automatically worse.
+                if title and title.lower() not in re.sub(
+                        r"\s+", " ", re.sub(r"<[^>]+>", " ", cand_body)).lower():
+                    print(f"  slide {num}: repair corrupted title — keeping original",
+                          flush=True)
+                    break
                 cand_png = renderer.render(cand_body)
                 cand_pv = judge_slide(payload, cand_png, archetype)
                 if cand_pv.ok or len(cand_pv.issues) <= len(pv.issues):

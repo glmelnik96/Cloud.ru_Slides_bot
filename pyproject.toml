@@ -27,6 +27,8 @@ dependencies = [
     "pillow>=10.4,<12.0",
     # Designer vision-QA render harness (scripts/render_png.py → import fitz)
     "pymupdf>=1.24,<2.0",
+    # /html pipeline: headless Chromium renderer (renderers/html/render.py)
+    "playwright>=1.45,<2.0",
     "lxml>=5.2,<6.0",
     "pyyaml>=6.0,<7.0",
     # Skill scripts: matplotlib for legacy chart_native PNG renderer, docx for /brief mode

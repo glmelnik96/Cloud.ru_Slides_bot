@@ -15,10 +15,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Brand fonts — bind into the system font path so soffice picks them up.
 COPY docker/fonts/ /usr/share/fonts/truetype/sbsans/
 RUN fc-cache -fv
+# Same fonts at the repo-relative path renderers/html/render.py resolves
+# (load_brand_css absolutises url() to file://<repo>/docker/fonts/...).
+COPY docker/fonts/ /app/docker/fonts/
 
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir .
+
+# /html pipeline: headless Chromium for Playwright (renderers/html/render.py).
+# --with-deps pulls the system libraries Chromium needs on slim Debian.
+RUN playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY worker ./worker
 COPY graph ./graph

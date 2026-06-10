@@ -192,3 +192,8 @@ async def verstai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @guarded
 async def design(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_pptx_job(update, context, mode=Mode.DESIGN, log_prefix="design")
+
+
+@guarded
+async def html(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_pptx_job(update, context, mode=Mode.HTML, log_prefix="html")

@@ -17,6 +17,7 @@ class Mode(str, Enum):
     AUDIT = "audit"
     BRIEF = "brief"
     DESIGN = "design"  # /design — from-scratch native-vector designer skill
+    HTML = "html"      # /html — LLM-authored HTML/CSS → Chromium PNG → pptx
 
 
 class Stage(str, Enum):
@@ -67,7 +68,7 @@ class SessionState(BaseModel):
     user_id: int
     chat_id: int
     progress_message_id: int
-    mode: Literal["verstai", "audit", "brief", "design"]
+    mode: Literal["verstai", "audit", "brief", "design", "html"]
     created_at_iso: str
 
     # Pipeline
